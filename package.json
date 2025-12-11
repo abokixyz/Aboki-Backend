@@ -1,6 +1,7 @@
 {
   "name": "typescript-backend",
   "version": "1.0.0",
+  "type": "module",
   "description": "Express MongoDB API with TypeScript and CDP Wallet Integration",
   "main": "dist/server.js",
   "scripts": {

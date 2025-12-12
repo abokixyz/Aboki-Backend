@@ -102,12 +102,12 @@ Authorization: Bearer <your-jwt-token>
     },
     servers: [
       {
-        url: 'http://localhost:5000',
-        description: 'Development server'
+        url: 'https://apis.aboki.xyz',
+        description: 'Production server'
       },
       {
-        url: 'https://api.example.com',
-        description: 'Production server (configure as needed)'
+        url: 'http://localhost:5000',
+        description: 'Development server'
       }
     ],
     tags: [

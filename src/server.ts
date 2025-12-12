@@ -18,22 +18,44 @@ import walletRoutes from './routes/walletRoutes';
 // Initialize express app
 const app: Application = express();
 
-// Middleware
-app.use(cors());
+// Enhanced CORS configuration
+app.use(cors({
+  origin: '*', // Allow all origins for development/testing
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Length', 'X-Requested-With']
+}));
+
+// Handle OPTIONS preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Connect to MongoDB
 connectDB();
 
+// Swagger JSON endpoint with CORS headers
+app.get('/api-docs/swagger.json', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send(swaggerSpec);
+});
+
 // Swagger documentation
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  swaggerOptions: {
+    url: '/api-docs/swagger.json',
+    persistAuthorization: true
+  }
+}));
 
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/invites', inviteRoutes);
-app.use('/api/wallet', walletRoutes);  // ← WALLET ROUTES
+app.use('/api/wallet', walletRoutes);
 
 // Health check
 app.get('/', (req: Request, res: Response) => {
@@ -87,11 +109,11 @@ app.listen(PORT, () => {
   ║                                                       ║
   ║   🚀 Server running on port ${PORT}                     ║
   ║                                                       ║
-  ║   📚 API Documentation: http://localhost:${PORT}/api-docs  ║
-  ║   🔐 Auth Endpoints:    http://localhost:${PORT}/api/auth  ║
-  ║   👥 User Endpoints:    http://localhost:${PORT}/api/users ║
-  ║   🎫 Invite Endpoints:  http://localhost:${PORT}/api/invites ║
-  ║   💰 Wallet Endpoints:  http://localhost:${PORT}/api/wallet ║
+  ║   📚 API Documentation: https://apis.aboki.xyz/api-docs  ║
+  ║   🔐 Auth Endpoints:    https://apis.aboki.xyz/api/auth  ║
+  ║   👥 User Endpoints:    https://apis.aboki.xyz/api/users ║
+  ║   🎫 Invite Endpoints:  https://apis.aboki.xyz/api/invites ║
+  ║   💰 Wallet Endpoints:  https://apis.aboki.xyz/api/wallet ║
   ║                                                       ║
   ╚═══════════════════════════════════════════════════════╝
   `);

@@ -13,6 +13,10 @@ import { protect } from '../middleware/auth';
 
 const router = Router();
 
+// ============================================
+// AUTHENTICATED USER ROUTES (My Invites)
+// ============================================
+
 /**
  * @swagger
  * /api/invites/my-code:
@@ -64,71 +68,33 @@ router.get('/my-code', protect, getMyInviteCode);
  */
 router.get('/my-referrals', protect, getMyReferrals);
 
-/**
- * @swagger
- * /api/invites:
- *   get:
- *     summary: Get all invite codes
- *     description: Retrieve all invite codes (admin use)
- *     tags: [Invite Codes]
- *     responses:
- *       200:
- *         description: List of all invite codes
- */
-router.get('/', getAllInviteCodes);
+// ============================================
+// PUBLIC INVITE CODE ROUTES
+// ============================================
 
 /**
  * @swagger
  * /api/invites/available:
  *   get:
  *     summary: Get available invite codes
- *     description: Retrieve all unused, non-expired invite codes
+ *     description: Retrieve all unused, non-expired invite codes that can be used for signup
  *     tags: [Invite Codes]
  *     responses:
  *       200:
  *         description: List of available invite codes
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               data:
+ *                 - code: "PROJECTINVITE"
+ *                   isLifetime: true
+ *                   createdBy: null
+ *                 - code: "JOHNDOEINVITEYOU"
+ *                   isLifetime: true
+ *                   createdBy: "johndoe"
  */
 router.get('/available', getAvailableInviteCodes);
-
-/**
- * @swagger
- * /api/invites/default:
- *   post:
- *     summary: Create default project invite code
- *     description: |
- *       Creates the default project invite code "PROJECTINVITE".
- *       This is the master invite code for initial project signups.
- *       Users who sign up with this code won't have a referrer.
- *     tags: [Invite Codes]
- *     responses:
- *       201:
- *         description: Default invite code created
- *       200:
- *         description: Default invite code already exists
- */
-router.post('/default', createDefaultInviteCode);
-
-/**
- * @swagger
- * /api/invites/{code}:
- *   get:
- *     summary: Get invite code details
- *     description: Get detailed information about a specific invite code
- *     tags: [Invite Codes]
- *     parameters:
- *       - in: path
- *         name: code
- *         required: true
- *         schema:
- *           type: string
- *           example: JOHNDOEINVITEYOU
- *     responses:
- *       200:
- *         description: Invite code found
- *       404:
- *         description: Invite code not found
- */
-router.get('/:code', getInviteCodeByCode);
 
 /**
  * @swagger
@@ -165,5 +131,96 @@ router.get('/:code', getInviteCodeByCode);
  *         description: Invite code not found
  */
 router.post('/:code/validate', validateInviteCode);
+
+/**
+ * @swagger
+ * /api/invites/{code}:
+ *   get:
+ *     summary: Get invite code details
+ *     description: Get detailed information about a specific invite code
+ *     tags: [Invite Codes]
+ *     parameters:
+ *       - in: path
+ *         name: code
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: JOHNDOEINVITEYOU
+ *     responses:
+ *       200:
+ *         description: Invite code found
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               data:
+ *                 code: "JOHNDOEINVITEYOU"
+ *                 isUsed: false
+ *                 isLifetime: true
+ *                 createdBy: "johndoe"
+ *       404:
+ *         description: Invite code not found
+ */
+router.get('/:code', getInviteCodeByCode);
+
+// ============================================
+// ADMIN/SYSTEM ROUTES
+// ============================================
+
+/**
+ * @swagger
+ * /api/invites:
+ *   get:
+ *     summary: Get all invite codes (admin)
+ *     description: Retrieve all invite codes in the system
+ *     tags: [Admin - Invite Codes]
+ *     responses:
+ *       200:
+ *         description: List of all invite codes
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               data:
+ *                 - code: "PROJECTINVITE"
+ *                   isUsed: true
+ *                   isLifetime: true
+ *                 - code: "JOHNDOEINVITEYOU"
+ *                   isUsed: false
+ *                   isLifetime: true
+ */
+router.get('/', getAllInviteCodes);
+
+/**
+ * @swagger
+ * /api/invites/default:
+ *   post:
+ *     summary: Create default project invite code
+ *     description: |
+ *       Creates the default project invite code "PROJECTINVITE".
+ *       This is the master invite code for initial project signups.
+ *       Users who sign up with this code won't have a referrer.
+ *       This should only be run once during initial setup.
+ *     tags: [Admin - Invite Codes]
+ *     responses:
+ *       201:
+ *         description: Default invite code created
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: "Default invite code 'PROJECTINVITE' created successfully"
+ *               data:
+ *                 code: "PROJECTINVITE"
+ *                 isLifetime: true
+ *       200:
+ *         description: Default invite code already exists
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: "Default invite code 'PROJECTINVITE' already exists"
+ */
+router.post('/default', createDefaultInviteCode);
 
 export default router;

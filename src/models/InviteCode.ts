@@ -3,13 +3,17 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IInviteCode extends Document {
   code: string;
-  isUsed: boolean;
   isLifetime: boolean;
-  usedBy?: mongoose.Types.ObjectId;
+  usedBy: mongoose.Types.ObjectId[];
   createdBy?: mongoose.Types.ObjectId;
   expiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
+  // Virtual properties
+  isUsed: boolean;
+  usageCount: number;
+  // Methods
+  isValid(): boolean;
 }
 
 const InviteCodeSchema = new Schema<IInviteCode>(
@@ -23,20 +27,15 @@ const InviteCodeSchema = new Schema<IInviteCode>(
       minlength: [6, 'Invite code must be at least 6 characters'],
       maxlength: [20, 'Invite code cannot exceed 20 characters']
     },
-    isUsed: {
-      type: Boolean,
-      default: false
-    },
     isLifetime: {
       type: Boolean,
       default: false,
       required: true
     },
-    usedBy: {
+    usedBy: [{
       type: Schema.Types.ObjectId,
-      ref: 'User',
-      default: null
-    },
+      ref: 'User'
+    }],
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',
@@ -68,8 +67,18 @@ const InviteCodeSchema = new Schema<IInviteCode>(
 
 // Index for faster queries
 InviteCodeSchema.index({ code: 1 });
-InviteCodeSchema.index({ isUsed: 1 });
 InviteCodeSchema.index({ expiresAt: 1 });
+InviteCodeSchema.index({ createdBy: 1 });
+
+// Virtual property to check if code has been used
+InviteCodeSchema.virtual('isUsed').get(function() {
+  return this.usedBy && this.usedBy.length > 0;
+});
+
+// Virtual property to get usage count
+InviteCodeSchema.virtual('usageCount').get(function() {
+  return this.usedBy ? this.usedBy.length : 0;
+});
 
 // Pre-save middleware to ensure data consistency
 InviteCodeSchema.pre('save', function(next) {
@@ -77,7 +86,27 @@ InviteCodeSchema.pre('save', function(next) {
   if (this.isLifetime) {
     this.expiresAt = undefined;
   }
+  
+  // Initialize usedBy array if it doesn't exist
+  if (!this.usedBy) {
+    this.usedBy = [];
+  }
+  
   next();
 });
+
+// Method to check if invite code is still valid
+InviteCodeSchema.methods.isValid = function(): boolean {
+  // Check if expired (for non-lifetime codes)
+  if (!this.isLifetime && this.expiresAt && this.expiresAt < new Date()) {
+    return false;
+  }
+  
+  return true;
+};
+
+// Ensure virtuals are included when converting to JSON
+InviteCodeSchema.set('toJSON', { virtuals: true });
+InviteCodeSchema.set('toObject', { virtuals: true });
 
 export default mongoose.model<IInviteCode>('InviteCode', InviteCodeSchema);

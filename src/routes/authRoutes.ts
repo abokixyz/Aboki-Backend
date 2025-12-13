@@ -1,10 +1,9 @@
-// ============= src/routes/authRoutes.ts =============
+// ============= src/routes/authRoutes.ts (PURE PASSKEY VERSION) =============
 import { Router } from 'express';
 import {
   signup,
   login,
   getMe,
-  updatePassword,
   logout
 } from '../controllers/authController';
 import { protect } from '../middleware/auth';
@@ -15,16 +14,18 @@ const router = Router();
  * @swagger
  * /api/auth/signup:
  *   post:
- *     summary: Register a new user
+ *     summary: Register with PASSKEY (Passwordless)
  *     description: |
- *       Create a new account with invite code. This will:
- *       - Validate the invite code
- *       - Create a user account with hashed password
- *       - Generate a Base blockchain wallet automatically
- *       - Auto-generate personal invite code: {username}inviteyou
- *       - Mark the invite code as used
- *       - Track who invited you (referral system)
- *       - Return a JWT token for authentication
+ *       Create a new account with passkey authentication (Face ID, Touch ID, Windows Hello).
+ *       This is a 100% passwordless signup flow using WebAuthn/FIDO2 standard.
+ *       
+ *       Process:
+ *       1. Validate invite code
+ *       2. Verify passkey credential
+ *       3. Create user account with passkey
+ *       4. Generate Base blockchain wallet
+ *       5. Auto-generate personal invite code
+ *       6. Return JWT token
  *     tags: [Authentication]
  *     requestBody:
  *       required: true
@@ -36,37 +37,55 @@ const router = Router();
  *               - name
  *               - username
  *               - email
- *               - password
+ *               - passkey
  *               - inviteCode
  *             properties:
  *               name:
  *                 type: string
  *                 description: Full name
- *                 example: John Doe
+ *                 example: Jane Smith
  *               username:
  *                 type: string
  *                 description: Unique username (3-30 characters, lowercase alphanumeric and underscores)
  *                 minLength: 3
  *                 maxLength: 30
- *                 example: johndoe
+ *                 example: janesmith
  *               email:
  *                 type: string
  *                 format: email
  *                 description: Email address (must be unique)
- *                 example: john.doe@example.com
- *               password:
- *                 type: string
- *                 format: password
- *                 description: Password (minimum 6 characters)
- *                 minLength: 6
- *                 example: SecurePass123!
+ *                 example: jane.smith@example.com
+ *               passkey:
+ *                 type: object
+ *                 description: WebAuthn passkey credential
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   rawId:
+ *                     type: string
+ *                     format: base64
+ *                   type:
+ *                     type: string
+ *                     example: public-key
+ *                   response:
+ *                     type: object
+ *                     properties:
+ *                       clientDataJSON:
+ *                         type: string
+ *                         format: base64
+ *                       attestationObject:
+ *                         type: string
+ *                         format: base64
+ *                   challenge:
+ *                     type: string
+ *                     format: base64
  *               inviteCode:
  *                 type: string
- *                 description: Valid invite code (PROJECTINVITE or another user's code like JOHNDOEINVITEYOU)
- *                 example: PROJECTINVITE
+ *                 description: Valid invite code (reusable)
+ *                 example: BOSSINVITEYOU
  *     responses:
  *       201:
- *         description: User registered successfully
+ *         description: User registered successfully with passkey
  *         content:
  *           application/json:
  *             schema:
@@ -77,68 +96,25 @@ const router = Router();
  *                   example: true
  *                 message:
  *                   type: string
- *                   example: Account created successfully with real CDP smart wallet on Base!
+ *                   example: Account created successfully with passkey authentication on Base!
  *                 data:
  *                   type: object
  *                   properties:
  *                     user:
  *                       type: object
- *                       properties:
- *                         _id:
- *                           type: string
- *                           example: "507f1f77bcf86cd799439011"
- *                         name:
- *                           type: string
- *                           example: "John Doe"
- *                         username:
- *                           type: string
- *                           example: "johndoe"
- *                         email:
- *                           type: string
- *                           example: "john.doe@example.com"
- *                         wallet:
- *                           type: object
- *                           properties:
- *                             ownerAddress:
- *                               type: string
- *                               example: "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"
- *                             smartAccountAddress:
- *                               type: string
- *                               example: "0x1234567890abcdef1234567890abcdef12345678"
- *                             network:
- *                               type: string
- *                               example: "base-mainnet"
- *                             isReal:
- *                               type: boolean
- *                               example: true
- *                         invitedBy:
- *                           type: object
- *                           nullable: true
- *                           properties:
- *                             username:
- *                               type: string
- *                               example: "referrer"
+ *                       description: User profile (without passkey data)
  *                     token:
  *                       type: string
  *                       description: JWT authentication token
- *                       example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
  *                     inviteCode:
  *                       type: string
- *                       description: Your personal invite code (auto-generated)
- *                       example: JOHNDOEINVITEYOU
+ *                       description: Personal invite code (auto-generated)
+ *                       example: JANESMITHINVITEYOU
+ *                     authMethod:
+ *                       type: string
+ *                       example: passkey
  *       400:
- *         description: Bad request (validation error, user exists, invalid invite code)
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: false
- *                 error:
- *                   type: string
- *                   example: Email already registered
+ *         description: Bad request (validation error, passkey verification failed)
  *       500:
  *         description: Server error
  */
@@ -148,10 +124,15 @@ router.post('/signup', signup);
  * @swagger
  * /api/auth/login:
  *   post:
- *     summary: Login user
+ *     summary: Login with PASSKEY (Passwordless)
  *     description: |
- *       Authenticate user with email and password.
- *       Returns a JWT token that should be included in subsequent requests.
+ *       Authenticate user with passkey (Face ID, Touch ID, Windows Hello).
+ *       100% passwordless login using WebAuthn/FIDO2 standard.
+ *       
+ *       Process:
+ *       1. Verify passkey assertion
+ *       2. Update counter (replay attack prevention)
+ *       3. Issue JWT token
  *     tags: [Authentication]
  *     requestBody:
  *       required: true
@@ -161,18 +142,40 @@ router.post('/signup', signup);
  *             type: object
  *             required:
  *               - email
- *               - password
+ *               - passkey
  *             properties:
  *               email:
  *                 type: string
  *                 format: email
  *                 description: User email address
- *                 example: john.doe@example.com
- *               password:
- *                 type: string
- *                 format: password
- *                 description: User password
- *                 example: SecurePass123!
+ *                 example: jane.smith@example.com
+ *               passkey:
+ *                 type: object
+ *                 description: WebAuthn passkey assertion
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   rawId:
+ *                     type: string
+ *                     format: base64
+ *                   type:
+ *                     type: string
+ *                     example: public-key
+ *                   response:
+ *                     type: object
+ *                     properties:
+ *                       clientDataJSON:
+ *                         type: string
+ *                         format: base64
+ *                       authenticatorData:
+ *                         type: string
+ *                         format: base64
+ *                       signature:
+ *                         type: string
+ *                         format: base64
+ *                   challenge:
+ *                     type: string
+ *                     format: base64
  *     responses:
  *       200:
  *         description: Login successful
@@ -196,9 +199,11 @@ router.post('/signup', signup);
  *                     token:
  *                       type: string
  *                       description: JWT authentication token
- *                       example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+ *                     authMethod:
+ *                       type: string
+ *                       example: passkey
  *       401:
- *         description: Invalid credentials
+ *         description: Invalid credentials or passkey verification failed
  *       500:
  *         description: Server error
  */
@@ -238,26 +243,17 @@ router.post('/login', login);
  *                       type: string
  *                     email:
  *                       type: string
+ *                     authMethod:
+ *                       type: string
+ *                       example: passkey
  *                     wallet:
  *                       type: object
  *                     invitedBy:
  *                       type: object
  *                       description: User who invited you
- *                       properties:
- *                         username:
- *                           type: string
- *                         name:
- *                           type: string
  *                     createdInviteCodes:
  *                       type: array
  *                       description: Invite codes you created
- *                       items:
- *                         type: object
- *                         properties:
- *                           code:
- *                             type: string
- *                           isUsed:
- *                             type: boolean
  *       401:
  *         description: Not authorized
  *       404:
@@ -266,67 +262,6 @@ router.post('/login', login);
  *         description: Server error
  */
 router.get('/me', protect, getMe);
-
-/**
- * @swagger
- * /api/auth/update-password:
- *   put:
- *     summary: Update user password
- *     description: |
- *       Change the password for the currently authenticated user.
- *       Returns a new JWT token.
- *     tags: [Authentication]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - currentPassword
- *               - newPassword
- *             properties:
- *               currentPassword:
- *                 type: string
- *                 format: password
- *                 description: Current password
- *                 example: OldPass123!
- *               newPassword:
- *                 type: string
- *                 format: password
- *                 description: New password (minimum 6 characters)
- *                 minLength: 6
- *                 example: NewSecurePass456!
- *     responses:
- *       200:
- *         description: Password updated successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 message:
- *                   type: string
- *                   example: Password updated successfully
- *                 data:
- *                   type: object
- *                   properties:
- *                     token:
- *                       type: string
- *                       description: New JWT token
- *       401:
- *         description: Current password is incorrect or not authorized
- *       404:
- *         description: User not found
- *       500:
- *         description: Server error
- */
-router.put('/update-password', protect, updatePassword);
 
 /**
  * @swagger

@@ -37,17 +37,14 @@ export const getMyWallet = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
+    const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
+    const network = user.wallet.network || 'base-mainnet';
+
     // Get ETH balance
-    const ethBalance = await getWalletBalance(
-      user.wallet.smartAccountAddress || user.wallet.ownerAddress,
-      user.wallet.network || 'base-mainnet'
-    );
+    const ethBalance = await getWalletBalance(address, network);
 
     // Get USDC balance
-    const usdcBalance = await getUSDCBalance(
-      user.wallet.smartAccountAddress || user.wallet.ownerAddress,
-      user.wallet.network || 'base-mainnet'
-    );
+    const usdcBalance = await getUSDCBalance(address, network);
 
     res.status(200).json({
       success: true,
@@ -55,6 +52,7 @@ export const getMyWallet = async (req: Request, res: Response): Promise<void> =>
         ownerAddress: user.wallet.ownerAddress,
         smartAccountAddress: user.wallet.smartAccountAddress,
         network: user.wallet.network,
+        isReal: user.wallet.isReal,
         userName: user.name,
         username: user.username,
         ethBalance: ethBalance.balance,
@@ -112,6 +110,7 @@ export const getMyBalance = async (req: Request, res: Response): Promise<void> =
         ownerAddress: user.wallet.ownerAddress,
         smartAccountAddress: user.wallet.smartAccountAddress,
         network: user.wallet.network,
+        isReal: user.wallet.isReal,
         ethBalance: ethBalance.balance,
         usdcBalance: usdcBalance.balance,
         balances: {
@@ -157,7 +156,8 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
     }
 
     // Validate token
-    if (!['ETH', 'USDC'].includes(token.toUpperCase())) {
+    const tokenUpper = token.toUpperCase();
+    if (!['ETH', 'USDC'].includes(tokenUpper)) {
       res.status(400).json({
         success: false,
         error: 'Token must be either ETH or USDC'
@@ -165,7 +165,7 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Get user with wallet data
+    // Get user with wallet data (including encrypted data)
     const user = await User.findById(req.user?.id).select('+wallet.encryptedWalletData');
 
     if (!user) {
@@ -176,7 +176,15 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (!user.wallet || !user.wallet.encryptedWalletData) {
+    if (!user.wallet) {
+      res.status(400).json({
+        success: false,
+        error: 'Wallet not found'
+      });
+      return;
+    }
+
+    if (!user.wallet.encryptedWalletData) {
       res.status(400).json({
         success: false,
         error: 'Wallet not configured for transactions'
@@ -184,17 +192,26 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
       return;
     }
 
+    // Check if wallet is real (on mainnet)
+    if (!user.wallet.isReal) {
+      res.status(400).json({
+        success: false,
+        error: 'This wallet is in test mode and cannot send real transactions'
+      });
+      return;
+    }
+
     const networkToUse = network || user.wallet.network || 'base-mainnet';
 
-    console.log(`💸 Processing ${token} transaction for ${user.username}`);
-    console.log(`   From: ${user.wallet.smartAccountAddress}`);
+    console.log(`💸 Processing ${tokenUpper} transaction for ${user.username}`);
+    console.log(`   From: ${user.wallet.smartAccountAddress || user.wallet.ownerAddress}`);
     console.log(`   To: ${toAddress}`);
-    console.log(`   Amount: ${amount} ${token}`);
+    console.log(`   Amount: ${amount} ${tokenUpper}`);
     console.log(`   Network: ${networkToUse}`);
 
     let result;
 
-    if (token.toUpperCase() === 'ETH') {
+    if (tokenUpper === 'ETH') {
       // Send ETH
       result = await sendETH(
         user._id.toString(),
@@ -219,19 +236,35 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
       );
     }
 
+    console.log(`✅ Transaction successful: ${result.transactionHash}`);
+
     res.status(200).json({
       success: true,
-      message: `${token} sent successfully`,
+      message: `${tokenUpper} sent successfully`,
       data: {
         ...result,
-        token
+        token: tokenUpper,
+        amount,
+        to: toAddress
       }
     });
   } catch (error: any) {
     console.error('❌ Transaction error:', error);
+    
+    // Provide more specific error messages
+    let errorMessage = error.message || 'Transaction failed';
+    
+    if (error.message?.includes('insufficient funds')) {
+      errorMessage = 'Insufficient balance to complete transaction';
+    } else if (error.message?.includes('invalid address')) {
+      errorMessage = 'Invalid recipient address';
+    } else if (error.message?.includes('nonce')) {
+      errorMessage = 'Transaction nonce error. Please try again';
+    }
+    
     res.status(500).json({
       success: false,
-      error: error.message || 'Transaction failed'
+      error: errorMessage
     });
   }
 };
@@ -257,24 +290,79 @@ export const getMyTransactions = async (req: Request, res: Response): Promise<vo
       res.status(200).json({
         success: true,
         data: [],
-        message: 'No transactions available'
+        message: 'No wallet found'
       });
       return;
     }
 
-    // TODO: Integrate with Basescan API to get real transaction history
-    const transactions: any[] = [];
+    const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
+    const network = user.wallet.network || 'base-mainnet';
+    const isMainnet = user.wallet.isReal;
+
+    // Provide explorer link for user to view transactions
+    const explorerUrl = isMainnet 
+      ? `https://basescan.org/address/${address}`
+      : `https://sepolia.basescan.org/address/${address}`;
 
     res.status(200).json({
       success: true,
-      count: transactions.length,
-      data: transactions,
-      message: transactions.length === 0 
-        ? 'No transactions found. Use Basescan API for full history.' 
-        : undefined
+      data: {
+        address,
+        network,
+        explorerUrl,
+        message: 'View full transaction history on the block explorer'
+      }
     });
   } catch (error: any) {
     console.error('❌ Error fetching transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Server Error'
+    });
+  }
+};
+
+/**
+ * @desc    Get wallet address by username
+ * @route   GET /api/wallet/user/:username
+ * @access  Public
+ */
+export const getWalletByUsername = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { username } = req.params;
+
+    const user = await User.findOne({ 
+      username: username.toLowerCase() 
+    }).select('username name wallet');
+
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+      return;
+    }
+
+    if (!user.wallet) {
+      res.status(404).json({
+        success: false,
+        error: 'User does not have a wallet'
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        username: user.username,
+        name: user.name,
+        ownerAddress: user.wallet.ownerAddress,
+        smartAccountAddress: user.wallet.smartAccountAddress,
+        network: user.wallet.network
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching wallet by username:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Server Error'
@@ -286,5 +374,6 @@ export default {
   getMyWallet,
   getMyBalance,
   sendTransaction,
-  getMyTransactions
+  getMyTransactions,
+  getWalletByUsername
 };

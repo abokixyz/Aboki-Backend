@@ -18,6 +18,7 @@
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.40.0",
     "@coinbase/coinbase-sdk": "^0.25.0",
+    "@simplewebauthn/server": "^13.2.2",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

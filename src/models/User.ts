@@ -1,49 +1,79 @@
-// ============= src/models/User.ts =============
+// ============= src/models/User.ts (PURE PASSKEY VERSION) =============
 import mongoose, { Schema, Document } from 'mongoose';
-import bcrypt from 'bcryptjs';
+
+export interface IPasskey {
+  credentialID: Buffer;
+  credentialPublicKey: Buffer;
+  counter: number;
+  credentialDeviceType: string;
+  credentialBackedUp: boolean;
+}
 
 export interface IUser extends Document {
   name: string;
   username: string;
   email: string;
-  password: string;
+  authMethod: 'passkey';
+  passkey: IPasskey;
   inviteCode: string;
-  invitedBy?: mongoose.Types.ObjectId; // NEW: Track who invited this user
+  invitedBy?: mongoose.Types.ObjectId;
   wallet: {
     ownerAddress: string;
     smartAccountAddress: string;
     network: string;
-    walletId?: string | null;
-    encryptedSeed?: string | null;
-    encryptedWalletData?: string | null;
-    isReal?: boolean;
+    isReal: boolean;
+    encryptedWalletData?: string; // Added this line
   };
   createdInviteCodes: mongoose.Types.ObjectId[];
   createdAt: Date;
   updatedAt: Date;
-  comparePassword(candidatePassword: string): Promise<boolean>;
 }
+
+const PasskeySchema: Schema = new Schema({
+  credentialID: {
+    type: Buffer,
+    required: true,
+    description: 'Unique identifier for the passkey credential'
+  },
+  credentialPublicKey: {
+    type: Buffer,
+    required: true,
+    description: 'Public key for passkey verification'
+  },
+  counter: {
+    type: Number,
+    required: true,
+    default: 0,
+    description: 'Counter for replay attack prevention'
+  },
+  credentialDeviceType: {
+    type: String,
+    required: true,
+    description: 'Type of authenticator (platform or cross-platform)'
+  },
+  credentialBackedUp: {
+    type: Boolean,
+    required: true,
+    description: 'Whether the credential is backed up (synced)'
+  }
+}, { _id: false });
 
 const UserSchema: Schema = new Schema(
   {
     name: {
       type: String,
       required: [true, 'Please add a name'],
-      trim: true,
-      maxlength: [50, 'Name cannot be more than 50 characters']
+      trim: true
     },
     username: {
       type: String,
       required: [true, 'Please add a username'],
       unique: true,
-      trim: true,
       lowercase: true,
+      trim: true,
       minlength: [3, 'Username must be at least 3 characters'],
-      maxlength: [30, 'Username cannot be more than 30 characters'],
-      match: [
-        /^[a-z0-9_]+$/,
-        'Username can only contain lowercase letters, numbers, and underscores'
-      ]
+      maxlength: [30, 'Username must be less than 30 characters'],
+      match: [/^[a-z0-9_]+$/, 'Username can only contain lowercase letters, numbers, and underscores']
     },
     email: {
       type: String,
@@ -51,15 +81,22 @@ const UserSchema: Schema = new Schema(
       unique: true,
       lowercase: true,
       match: [
-        /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/,
+        /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
         'Please add a valid email'
       ]
     },
-    password: {
+    authMethod: {
       type: String,
-      required: [true, 'Please add a password'],
-      minlength: [6, 'Password must be at least 6 characters'],
-      select: false
+      enum: ['passkey'],
+      default: 'passkey',
+      required: true,
+      description: 'Authentication method - passkey only for pure passkey system'
+    },
+    passkey: {
+      type: PasskeySchema,
+      required: true,
+      select: false, // Don't include passkey data by default (security)
+      description: 'Passkey credential data for WebAuthn authentication'
     },
     inviteCode: {
       type: String,
@@ -67,9 +104,10 @@ const UserSchema: Schema = new Schema(
       uppercase: true
     },
     invitedBy: {
-      type: Schema.Types.ObjectId,
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      default: null
+      default: null,
+      description: 'User who invited this user (referral tracking)'
     },
     wallet: {
       ownerAddress: {
@@ -82,31 +120,23 @@ const UserSchema: Schema = new Schema(
       },
       network: {
         type: String,
-        required: true,
         default: 'base-mainnet'
-      },
-      walletId: {
-        type: String,
-        default: null
-      },
-      encryptedSeed: {
-        type: String,
-        default: null,
-        select: false
-      },
-      encryptedWalletData: {
-        type: String,
-        default: null,
-        select: false
       },
       isReal: {
         type: Boolean,
         default: false
+      },
+      encryptedWalletData: {
+        type: String,
+        required: false,
+        select: false, // Don't include by default for security - must explicitly select
+        description: 'Encrypted private key data for transaction signing'
       }
     },
     createdInviteCodes: [{
-      type: Schema.Types.ObjectId,
-      ref: 'InviteCode'
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'InviteCode',
+      description: 'Invite codes created by this user'
     }]
   },
   {
@@ -114,19 +144,10 @@ const UserSchema: Schema = new Schema(
   }
 );
 
-// Hash password before saving
-UserSchema.pre('save', async function(next) {
-  if (!this.isModified('password')) {
-    next();
-  }
-
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-});
-
-// Compare password method
-UserSchema.methods.comparePassword = async function(candidatePassword: string): Promise<boolean> {
-  return await bcrypt.compare(candidatePassword, this.password);
-};
+// Indexes for performance
+UserSchema.index({ email: 1 });
+UserSchema.index({ username: 1 });
+UserSchema.index({ invitedBy: 1 });
+UserSchema.index({ 'passkey.credentialID': 1 }); // For passkey lookup
 
 export default mongoose.model<IUser>('User', UserSchema);

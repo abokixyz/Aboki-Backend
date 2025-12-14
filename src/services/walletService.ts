@@ -1,4 +1,4 @@
-// ============= src/services/walletService.ts =============
+// ============= src/services/walletService.ts (UPDATED) =============
 import { CdpClient } from '@coinbase/cdp-sdk';
 import { parseEther, formatEther, encodeFunctionData, createPublicClient, http } from 'viem';
 import { base, baseSepolia } from 'viem/chains';
@@ -30,9 +30,9 @@ const decrypt = (encryptedText: string): string => {
 };
 
 /**
- * Supported networks
+ * Supported networks - EXPORTED for use in controllers
  */
-type NetworkType = 'base-mainnet' | 'base-sepolia' | 'ethereum-sepolia';
+export type NetworkType = 'base-mainnet' | 'base-sepolia' | 'ethereum-sepolia';
 
 // USDC Contract Addresses
 const USDC_ADDRESS_MAINNET = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
@@ -101,7 +101,7 @@ export const createServerWallet = async () => {
     return {
       ownerAddress: owner.address,
       smartAccountAddress: smartAccount.address,
-      network: 'base-mainnet',
+      network: 'base-mainnet' as NetworkType,
       walletId: smartAccount.address,
       encryptedSeed: null,
       encryptedWalletData,
@@ -124,7 +124,7 @@ const createMockWallet = () => {
   return {
     ownerAddress: address,
     smartAccountAddress: address,
-    network: 'base',
+    network: 'base-mainnet' as NetworkType,
     walletId: null,
     encryptedSeed: null,
     encryptedWalletData: null,
@@ -137,7 +137,7 @@ const createMockWallet = () => {
  */
 export const getWalletBalance = async (
   smartAccountAddress: string | null,
-  network: string = 'base-mainnet'
+  network: NetworkType = 'base-mainnet'
 ) => {
   if (!smartAccountAddress) {
     return {
@@ -186,7 +186,7 @@ export const getWalletBalance = async (
  */
 export const getUSDCBalance = async (
   address: string | null,
-  network: string = 'base-mainnet'
+  network: NetworkType = 'base-mainnet'
 ): Promise<{ balance: string; balanceInWei: string; currency: string; isReal: boolean }> => {
   if (!address) {
     return {
@@ -337,6 +337,8 @@ export const sendToken = async (
 
   try {
     console.log(`💸 Sending ${amount} tokens to ${toAddress}`);
+    console.log(`   Token: ${tokenAddress}`);
+    console.log(`   Network: ${network}`);
 
     const walletData = JSON.parse(decrypt(encryptedWalletData));
 
@@ -375,6 +377,7 @@ export const sendToken = async (
     });
 
     console.log('📝 UserOp Hash:', result.userOpHash);
+    console.log('   Waiting for confirmation...');
 
     const userOperation = await cdp.evm.waitForUserOperation({
       smartAccountAddress: smartAccount.address,
@@ -386,6 +389,7 @@ export const sendToken = async (
     }
 
     console.log('✅ Token transfer successful!');
+    console.log('   TX Hash:', userOperation.transactionHash);
 
     return {
       success: true,
@@ -466,6 +470,7 @@ export const getTransactionHistory = async (smartAccountAddress: string) => {
   return [];
 };
 
+// Export everything including NetworkType
 export default {
   createServerWallet,
   getWalletBalance,

@@ -1,0 +1,512 @@
+// ============= src/controllers/onrampController.ts (FIXED TYPE) =============
+import { Request, Response } from 'express';
+import crypto from 'crypto';
+import axios from 'axios';
+import mongoose from 'mongoose';
+import User from '../models/User';
+import OnrampTransaction from '../models/OnrampTransaction';
+import { sendToken, NetworkType } from '../services/walletService';
+
+// Monnify Configuration
+const MONNIFY_API_KEY = process.env.MONNIFY_API_KEY || 'MK_PROD_FLX4P92EDF';
+const MONNIFY_SECRET_KEY = process.env.MONNIFY_SECRET_KEY || '';
+const MONNIFY_CONTRACT_CODE = process.env.MONNIFY_CONTRACT_CODE || '626609763141';
+const MONNIFY_BASE_URL = process.env.MONNIFY_BASE_URL || 'https://api.monnify.com';
+
+// Monnify IPs for webhook verification
+const MONNIFY_ALLOWED_IPS = process.env.MONNIFY_IPS?.split(',') || [];
+
+// USDC Contract on Base
+const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+// Exchange rate and limits
+const NGN_TO_USD_RATE = 1550;
+const FEE_PERCENTAGE = 0.02;
+
+// Transaction limits (in NGN)
+const MIN_AMOUNT_NGN = 1000;
+const MAX_AMOUNT_NGN = 1000000;
+const DAILY_LIMIT_NGN = 5000000;
+
+/**
+ * Verify Monnify webhook signature
+ */
+const verifyMonnifySignature = (payload: any, signature: string): boolean => {
+  if (!MONNIFY_SECRET_KEY) {
+    console.warn('⚠️ MONNIFY_SECRET_KEY not set - skipping signature verification');
+    return true;
+  }
+
+  try {
+    const hash = crypto
+      .createHmac('sha512', MONNIFY_SECRET_KEY)
+      .update(JSON.stringify(payload))
+      .digest('hex');
+    
+    return hash === signature;
+  } catch (error) {
+    console.error('❌ Signature verification error:', error);
+    return false;
+  }
+};
+
+/**
+ * Check if request IP is from Monnify
+ */
+const isValidMonnifyIP = (req: Request): boolean => {
+  if (MONNIFY_ALLOWED_IPS.length === 0) {
+    console.warn('⚠️ MONNIFY_ALLOWED_IPS not set - skipping IP verification');
+    return true;
+  }
+
+  const clientIP = req.ip || 
+                   req.headers['x-forwarded-for'] || 
+                   req.connection.remoteAddress;
+  
+  return MONNIFY_ALLOWED_IPS.includes(clientIP as string);
+};
+
+/**
+ * Check user's daily transaction limit
+ */
+const checkDailyLimit = async (userId: string, newAmount: number): Promise<boolean> => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const todayTransactions = await OnrampTransaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(userId),
+        createdAt: { $gte: today },
+        status: { $in: ['COMPLETED', 'PENDING', 'PAID'] }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: '$amountNGN' }
+      }
+    }
+  ]);
+
+  const currentTotal = todayTransactions[0]?.total || 0;
+  return (currentTotal + newAmount) <= DAILY_LIMIT_NGN;
+};
+
+/**
+ * @desc    Initialize onramp payment
+ * @route   POST /api/onramp/initialize
+ * @access  Private
+ */
+export const initializeOnramp = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { amountNGN, customerEmail, customerPhone } = req.body;
+
+    if (!amountNGN || amountNGN <= 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Please provide a valid amount in NGN'
+      });
+      return;
+    }
+
+    if (typeof amountNGN !== 'number' && isNaN(parseFloat(amountNGN))) {
+      res.status(400).json({
+        success: false,
+        error: 'Amount must be a valid number'
+      });
+      return;
+    }
+
+    const amount = parseFloat(amountNGN.toString());
+
+    if (amount < MIN_AMOUNT_NGN) {
+      res.status(400).json({
+        success: false,
+        error: `Minimum amount is ₦${MIN_AMOUNT_NGN.toLocaleString()}`
+      });
+      return;
+    }
+
+    if (amount > MAX_AMOUNT_NGN) {
+      res.status(400).json({
+        success: false,
+        error: `Maximum amount per transaction is ₦${MAX_AMOUNT_NGN.toLocaleString()}`
+      });
+      return;
+    }
+
+    const user = await User.findById(req.user?.id);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+      return;
+    }
+
+    if (!user.wallet) {
+      res.status(400).json({
+        success: false,
+        error: 'Please create a wallet first'
+      });
+      return;
+    }
+
+    const withinLimit = await checkDailyLimit(user._id.toString(), amount);
+    if (!withinLimit) {
+      res.status(400).json({
+        success: false,
+        error: `Daily transaction limit of ₦${DAILY_LIMIT_NGN.toLocaleString()} exceeded`
+      });
+      return;
+    }
+
+    const amountUSD = amount / NGN_TO_USD_RATE;
+    const feeUSD = amountUSD * FEE_PERCENTAGE;
+    const finalUSDC = amountUSD - feeUSD;
+
+    const timestamp = Date.now();
+    const randomBytes = crypto.randomBytes(4).toString('hex');
+    const userIdShort = user._id.toString().slice(-6);
+    const paymentReference = `ABOKI_${timestamp}_${userIdShort}_${randomBytes}`;
+
+    const transaction = await OnrampTransaction.create({
+      userId: user._id,
+      paymentReference,
+      monnifyReference: '',
+      amountNGN: amount,
+      amountUSD: parseFloat(amountUSD.toFixed(2)),
+      usdcAmount: parseFloat(finalUSDC.toFixed(6)),
+      exchangeRate: NGN_TO_USD_RATE,
+      fee: parseFloat(feeUSD.toFixed(2)),
+      status: 'PENDING',
+      customerEmail: customerEmail || user.email,
+      customerName: user.name,
+      walletAddress: user.wallet.smartAccountAddress || user.wallet.ownerAddress
+    });
+
+    const monnifyConfig = {
+      amount: amount,
+      currency: 'NGN',
+      reference: paymentReference,
+      customerFullName: user.name,
+      customerEmail: customerEmail || user.email,
+      customerMobileNumber: customerPhone || '',
+      apiKey: MONNIFY_API_KEY,
+      contractCode: MONNIFY_CONTRACT_CODE,
+      paymentDescription: `Buy ${finalUSDC.toFixed(2)} USDC on Aboki`,
+      paymentMethods: ['CARD', 'ACCOUNT_TRANSFER', 'USSD', 'PHONE_NUMBER'],
+      metadata: {
+        userId: user._id.toString(),
+        username: user.username,
+        transactionId: transaction._id.toString(),
+        expectedUSDC: finalUSDC.toFixed(6),
+        walletAddress: transaction.walletAddress
+      }
+    };
+
+    console.log(`🎫 Onramp initialized for ${user.username}`);
+    console.log(`   Amount NGN: ₦${amount.toLocaleString()}`);
+    console.log(`   Expected USDC: ${finalUSDC.toFixed(6)}`);
+    console.log(`   Reference: ${paymentReference}`);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: transaction._id,
+        paymentReference,
+        amountNGN: amount,
+        expectedUSDC: finalUSDC.toFixed(6),
+        exchangeRate: NGN_TO_USD_RATE,
+        fee: parseFloat(feeUSD.toFixed(2)),
+        feePercentage: FEE_PERCENTAGE * 100,
+        limits: {
+          min: MIN_AMOUNT_NGN,
+          max: MAX_AMOUNT_NGN,
+          dailyLimit: DAILY_LIMIT_NGN
+        },
+        monnifyConfig
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error initializing onramp:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to initialize payment'
+    });
+  }
+};
+
+/**
+ * @desc    Handle Monnify webhook
+ * @route   POST /api/onramp/webhook
+ * @access  Public (but verified)
+ */
+export const handleMonnifyWebhook = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const payload = req.body;
+    
+    console.log('📨 Received Monnify webhook');
+
+    const signature = req.headers['monnify-signature'] as string;
+    if (signature && !verifyMonnifySignature(payload, signature)) {
+      console.error('❌ Invalid webhook signature');
+      res.status(401).json({
+        success: false,
+        error: 'Invalid signature'
+      });
+      return;
+    }
+
+    if (!isValidMonnifyIP(req)) {
+      const clientIP = req.ip || req.headers['x-forwarded-for'];
+      console.error(`❌ Webhook from unauthorized IP: ${clientIP}`);
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden'
+      });
+      return;
+    }
+
+    const {
+      transactionReference,
+      paymentReference,
+      amountPaid,
+      totalPayable,
+      paidOn,
+      paymentStatus,
+      paymentMethod,
+      currency,
+      customerEmail,
+      customerName
+    } = payload;
+
+    if (!paymentReference || !paymentStatus) {
+      console.error('❌ Missing required webhook fields');
+      res.status(400).json({
+        success: false,
+        error: 'Invalid webhook payload'
+      });
+      return;
+    }
+
+    const transaction = await OnrampTransaction.findOne({ paymentReference });
+
+    if (!transaction) {
+      console.error(`❌ Transaction not found for reference: ${paymentReference}`);
+      res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+      return;
+    }
+
+    if (transaction.status === 'COMPLETED') {
+      console.log(`✅ Transaction already completed (idempotency): ${paymentReference}`);
+      res.status(200).json({
+        success: true,
+        message: 'Transaction already processed'
+      });
+      return;
+    }
+
+    transaction.monnifyReference = transactionReference;
+    transaction.amountPaidNGN = amountPaid;
+    transaction.paymentMethod = paymentMethod;
+    transaction.paidAt = paidOn ? new Date(paidOn) : new Date();
+
+    if (paymentStatus !== 'PAID') {
+      transaction.status = paymentStatus === 'USER_CANCELLED' ? 'CANCELLED' : 'FAILED';
+      transaction.failureReason = `Payment status: ${paymentStatus}`;
+      await transaction.save();
+      
+      console.log(`⚠️ Payment not successful: ${paymentStatus}`);
+      res.status(200).json({
+        success: true,
+        message: `Payment ${paymentStatus}`
+      });
+      return;
+    }
+
+    const TOLERANCE_NGN = 1;
+    const amountDifference = Math.abs(amountPaid - transaction.amountNGN);
+
+    if (amountDifference > TOLERANCE_NGN) {
+      console.error(`❌ AMOUNT MISMATCH DETECTED!`);
+      console.error(`   Expected: ₦${transaction.amountNGN}`);
+      console.error(`   Paid: ₦${amountPaid}`);
+      
+      transaction.status = 'FAILED';
+      transaction.failureReason = `Amount mismatch: Expected ${transaction.amountNGN}, Paid ${amountPaid}`;
+      await transaction.save();
+      
+      res.status(400).json({
+        success: false,
+        error: 'Amount mismatch'
+      });
+      return;
+    }
+
+    const user = await User.findById(transaction.userId).select('+wallet.encryptedWalletData');
+    
+    if (!user || !user.wallet || !user.wallet.encryptedWalletData) {
+      console.error(`❌ User or wallet not found`);
+      
+      transaction.status = 'FAILED';
+      transaction.failureReason = 'User wallet not found';
+      await transaction.save();
+      
+      res.status(400).json({
+        success: false,
+        error: 'User wallet not found'
+      });
+      return;
+    }
+
+    console.log(`💰 Sending USDC to user`);
+    console.log(`   Amount: ${transaction.usdcAmount} USDC`);
+    console.log(`   To: ${transaction.walletAddress}`);
+
+    try {
+      const usdcInWei = Math.floor(transaction.usdcAmount * 1e6).toString();
+      
+      // FIX: Cast network to NetworkType
+      const network = (user.wallet.network || 'base-mainnet') as NetworkType;
+      
+      const result = await sendToken(
+        user._id.toString(),
+        user.wallet.encryptedWalletData,
+        USDC_ADDRESS,
+        transaction.walletAddress,
+        usdcInWei,
+        6,
+        network // Now properly typed
+      );
+
+      transaction.status = 'COMPLETED';
+      transaction.transactionHash = result.transactionHash;
+      transaction.completedAt = new Date();
+      await transaction.save();
+
+      console.log(`✅ USDC CREDITED SUCCESSFULLY`);
+      console.log(`   Transaction Hash: ${result.transactionHash}`);
+
+      res.status(200).json({
+        success: true,
+        message: 'USDC credited successfully',
+        data: {
+          transactionHash: result.transactionHash,
+          amount: transaction.usdcAmount,
+          usdcAmount: transaction.usdcAmount,
+          walletAddress: transaction.walletAddress
+        }
+      });
+    } catch (sendError: any) {
+      console.error('❌ CRITICAL: Failed to send USDC');
+      console.error('   Error:', sendError.message);
+      
+      transaction.status = 'FAILED';
+      transaction.failureReason = `USDC transfer failed: ${sendError.message}`;
+      await transaction.save();
+
+      console.error('🚨 URGENT: Manual intervention required!');
+      console.error(`   Transaction ID: ${transaction._id}`);
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to credit USDC. Support team notified.'
+      });
+    }
+  } catch (error: any) {
+    console.error('❌ Webhook processing error:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Webhook processing failed'
+    });
+  }
+};
+
+/**
+ * @desc    Verify payment status
+ * @route   GET /api/onramp/verify/:reference
+ * @access  Private
+ */
+export const verifyPayment = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { reference } = req.params;
+
+    const transaction = await OnrampTransaction.findOne({
+      paymentReference: reference,
+      userId: req.user?.id
+    });
+
+    if (!transaction) {
+      res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: transaction._id,
+        paymentReference: transaction.paymentReference,
+        monnifyReference: transaction.monnifyReference,
+        status: transaction.status,
+        amountNGN: transaction.amountNGN,
+        amountPaidNGN: transaction.amountPaidNGN,
+        usdcAmount: transaction.usdcAmount,
+        transactionHash: transaction.transactionHash,
+        createdAt: transaction.createdAt,
+        paidAt: transaction.paidAt,
+        completedAt: transaction.completedAt,
+        failureReason: transaction.failureReason
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error verifying payment:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Verification failed'
+    });
+  }
+};
+
+/**
+ * @desc    Get onramp transaction history
+ * @route   GET /api/onramp/history
+ * @access  Private
+ */
+export const getOnrampHistory = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const transactions = await OnrampTransaction.find({
+      userId: req.user?.id
+    })
+    .select('-userId')
+    .sort({ createdAt: -1 })
+    .limit(50);
+
+    res.status(200).json({
+      success: true,
+      count: transactions.length,
+      data: transactions
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching history:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to fetch history'
+    });
+  }
+};
+
+export default {
+  initializeOnramp,
+  handleMonnifyWebhook,
+  verifyPayment,
+  getOnrampHistory
+};

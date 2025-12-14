@@ -1,9 +1,10 @@
-// ============= src/controllers/userController.ts =============
+// ============= src/controllers/userController.ts (UPDATED) =============
 import { Request, Response } from 'express';
 import User from '../models/User';
 import {
   getWalletBalance,
-  getUSDCBalance
+  getUSDCBalance,
+  NetworkType
 } from '../services/walletService';
 
 /**
@@ -183,7 +184,7 @@ export const getMyBalance = async (req: Request, res: Response): Promise<void> =
     }
 
     const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
-    const network = user.wallet.network || 'base-mainnet';
+    const network = (user.wallet.network || 'base-mainnet') as NetworkType;
 
     // Get both ETH and USDC balances
     const ethBalance = await getWalletBalance(address, network);

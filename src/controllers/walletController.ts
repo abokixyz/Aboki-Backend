@@ -1,11 +1,12 @@
-// ============= src/controllers/walletController.ts =============
+// ============= src/controllers/walletController.ts (UPDATED) =============
 import { Request, Response } from 'express';
 import User from '../models/User';
 import {
   getWalletBalance,
   getUSDCBalance,
   sendTransaction as sendETH,
-  sendToken
+  sendToken,
+  NetworkType
 } from '../services/walletService';
 
 // USDC Contract Address on Base Mainnet
@@ -18,7 +19,6 @@ const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
  */
 export const getMyWallet = async (req: Request, res: Response): Promise<void> => {
   try {
-    // req.user is set by protect middleware
     const user = await User.findById(req.user?.id);
 
     if (!user) {
@@ -38,7 +38,7 @@ export const getMyWallet = async (req: Request, res: Response): Promise<void> =>
     }
 
     const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
-    const network = user.wallet.network || 'base-mainnet';
+    const network = (user.wallet.network || 'base-mainnet') as NetworkType;
 
     // Get ETH balance
     const ethBalance = await getWalletBalance(address, network);
@@ -52,15 +52,9 @@ export const getMyWallet = async (req: Request, res: Response): Promise<void> =>
         ownerAddress: user.wallet.ownerAddress,
         smartAccountAddress: user.wallet.smartAccountAddress,
         network: user.wallet.network,
-        isReal: user.wallet.isReal,
-        userName: user.name,
-        username: user.username,
-        ethBalance: ethBalance.balance,
+        balance: ethBalance.balance,
         usdcBalance: usdcBalance.balance,
-        balances: {
-          ETH: ethBalance,
-          USDC: usdcBalance
-        }
+        isReal: user.wallet.isReal
       }
     });
   } catch (error: any) {
@@ -98,7 +92,7 @@ export const getMyBalance = async (req: Request, res: Response): Promise<void> =
     }
 
     const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
-    const network = user.wallet.network || 'base-mainnet';
+    const network = (user.wallet.network || 'base-mainnet') as NetworkType;
 
     // Get both ETH and USDC balances
     const ethBalance = await getWalletBalance(address, network);
@@ -201,7 +195,7 @@ export const sendTransaction = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    const networkToUse = network || user.wallet.network || 'base-mainnet';
+    const networkToUse = (network || user.wallet.network || 'base-mainnet') as NetworkType;
 
     console.log(`💸 Processing ${tokenUpper} transaction for ${user.username}`);
     console.log(`   From: ${user.wallet.smartAccountAddress || user.wallet.ownerAddress}`);

@@ -14,6 +14,7 @@ import authRoutes from './routes/authRoutes';
 import userRoutes from './routes/userRoutes';
 import inviteRoutes from './routes/inviteRoutes';
 import walletRoutes from './routes/walletRoutes';
+import onrampRoutes from './routes/onrampRoutes'
 
 // Initialize express app
 const app: Application = express();
@@ -56,6 +57,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/onramp', onrampRoutes);
 
 // Health check
 app.get('/', (req: Request, res: Response) => {

@@ -1,5 +1,5 @@
-// ============= src/services/adminWalletService.ts (NEW) =============
-import { createWalletClient, http, parseUnits, formatUnits, createPublicClient } from 'viem';
+// ============= src/services/adminWalletService.ts (WITH GAS CHECKS) =============
+import { createWalletClient, http, parseUnits, formatUnits, createPublicClient, formatEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import { NetworkType } from './walletService';
@@ -16,7 +16,11 @@ const CONTRACT_NETWORK = (process.env.ABOKI_CONTRACT_NETWORK || 'base-mainnet') 
 const USDC_ADDRESS_MAINNET = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const USDC_ADDRESS_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 
-// ERC20 ABI (Fixed allowance function)
+// Gas configuration
+const MIN_ETH_BALANCE = 0.001; // Minimum 0.001 ETH required for gas
+const GAS_BUFFER_MULTIPLIER = 1.5; // 50% buffer for gas price fluctuations
+
+// ERC20 ABI
 const ERC20_ABI = [
   {
     inputs: [{ name: "account", type: "address" }],
@@ -47,7 +51,7 @@ const ERC20_ABI = [
   }
 ] as const;
 
-// Aboki Contract ABI (only what we need)
+// Aboki Contract ABI
 const ABOKI_ABI = [
   {
     inputs: [
@@ -122,6 +126,34 @@ const getPublicClient = (network: NetworkType) => {
 };
 
 /**
+ * Check admin wallet ETH balance (for gas fees)
+ */
+export const getAdminETHBalance = async (network: NetworkType = 'base-mainnet') => {
+  try {
+    const publicClient = getPublicClient(network);
+
+    const balance = await publicClient.getBalance({
+      address: ADMIN_WALLET_ADDRESS as `0x${string}`
+    });
+
+    const balanceInEth = Number(formatEther(balance));
+
+    console.log(`⛽ Admin ETH Balance: ${balanceInEth.toFixed(6)} ETH`);
+
+    return {
+      balance: balanceInEth,
+      balanceInWei: balance.toString(),
+      address: ADMIN_WALLET_ADDRESS,
+      network,
+      sufficient: balanceInEth >= MIN_ETH_BALANCE
+    };
+  } catch (error: any) {
+    console.error('❌ Error checking admin ETH balance:', error.message);
+    throw new Error(`Failed to check admin ETH balance: ${error.message}`);
+  }
+};
+
+/**
  * Check admin wallet USDC balance
  */
 export const getAdminUSDCBalance = async (network: NetworkType = 'base-mainnet') => {
@@ -153,6 +185,144 @@ export const getAdminUSDCBalance = async (network: NetworkType = 'base-mainnet')
 };
 
 /**
+ * Estimate gas for creating an order
+ */
+const estimateOrderGas = async (
+  usdcAmount: number,
+  rate: number,
+  userWalletAddress: string,
+  network: NetworkType = 'base-mainnet'
+) => {
+  try {
+    const { usdcAddress } = getChainConfig(network);
+    const walletClient = getAdminWalletClient(network);
+    const publicClient = getPublicClient(network);
+
+    const amountInWei = parseUnits(usdcAmount.toFixed(6), 6);
+
+    // Estimate gas for the createOrder transaction
+    const gasEstimate = await publicClient.estimateContractGas({
+      address: ABOKI_CONTRACT_ADDRESS as `0x${string}`,
+      abi: ABOKI_ABI,
+      functionName: 'createOrder',
+      args: [
+        usdcAddress as `0x${string}`,
+        amountInWei,
+        BigInt(Math.floor(rate * 100)),
+        ADMIN_WALLET_ADDRESS as `0x${string}`,
+        userWalletAddress as `0x${string}`
+      ],
+      account: walletClient.account
+    });
+
+    // Get current gas price
+    const gasPrice = await publicClient.getGasPrice();
+
+    // Calculate total gas cost in ETH
+    const gasCost = gasEstimate * gasPrice;
+    const gasCostInEth = Number(formatEther(gasCost));
+
+    // Add buffer for gas price fluctuations
+    const gasCostWithBuffer = gasCostInEth * GAS_BUFFER_MULTIPLIER;
+
+    console.log(`⛽ Gas Estimate:`);
+    console.log(`   Gas Units: ${gasEstimate.toString()}`);
+    console.log(`   Gas Price: ${formatEther(gasPrice)} ETH/gas`);
+    console.log(`   Estimated Cost: ${gasCostInEth.toFixed(6)} ETH`);
+    console.log(`   With Buffer (${GAS_BUFFER_MULTIPLIER}x): ${gasCostWithBuffer.toFixed(6)} ETH`);
+
+    return {
+      gasEstimate: gasEstimate.toString(),
+      gasPrice: gasPrice.toString(),
+      gasCostInEth,
+      gasCostWithBuffer,
+      sufficient: false // Will be set by caller
+    };
+  } catch (error: any) {
+    console.error('❌ Gas estimation failed:', error.message);
+    throw new Error(`Failed to estimate gas: ${error.message}`);
+  }
+};
+
+/**
+ * Comprehensive pre-flight checks before processing order
+ */
+export const performPreflightChecks = async (
+  usdcAmount: number,
+  rate: number,
+  userWalletAddress: string,
+  network: NetworkType = 'base-mainnet'
+) => {
+  console.log(`🔍 Performing pre-flight checks...`);
+
+  // Check 1: USDC Balance
+  const usdcBalance = await getAdminUSDCBalance(network);
+  const hasEnoughUSDC = usdcBalance.balance >= usdcAmount;
+
+  if (!hasEnoughUSDC) {
+    console.error(`❌ Insufficient USDC: Need ${usdcAmount}, have ${usdcBalance.balance}`);
+  }
+
+  // Check 2: ETH Balance (for gas)
+  const ethBalance = await getAdminETHBalance(network);
+  const hasEnoughETH = ethBalance.sufficient;
+
+  if (!hasEnoughETH) {
+    console.error(`❌ Insufficient ETH for gas: Have ${ethBalance.balance.toFixed(6)} ETH, need at least ${MIN_ETH_BALANCE} ETH`);
+  }
+
+  // Check 3: Estimate gas and verify sufficient ETH
+  let gasEstimate;
+  let hasEnoughGas = false;
+
+  try {
+    gasEstimate = await estimateOrderGas(usdcAmount, rate, userWalletAddress, network);
+    hasEnoughGas = ethBalance.balance >= gasEstimate.gasCostWithBuffer;
+    gasEstimate.sufficient = hasEnoughGas;
+
+    if (!hasEnoughGas) {
+      console.error(`❌ Insufficient ETH for estimated gas:`);
+      console.error(`   Need: ${gasEstimate.gasCostWithBuffer.toFixed(6)} ETH`);
+      console.error(`   Have: ${ethBalance.balance.toFixed(6)} ETH`);
+    }
+  } catch (error: any) {
+    console.warn(`⚠️ Could not estimate gas: ${error.message}`);
+    // If gas estimation fails, still proceed if we have minimum ETH
+    hasEnoughGas = hasEnoughETH;
+  }
+
+  const allChecksPassed = hasEnoughUSDC && hasEnoughETH && hasEnoughGas;
+
+  console.log(`\n📋 Pre-flight Check Results:`);
+  console.log(`   USDC Balance: ${hasEnoughUSDC ? '✅' : '❌'} (${usdcBalance.balance.toFixed(2)} USDC)`);
+  console.log(`   ETH Balance: ${hasEnoughETH ? '✅' : '❌'} (${ethBalance.balance.toFixed(6)} ETH)`);
+  console.log(`   Gas Estimate: ${hasEnoughGas ? '✅' : '❌'} (${gasEstimate?.gasCostWithBuffer.toFixed(6) || 'N/A'} ETH needed)`);
+  console.log(`   Overall: ${allChecksPassed ? '✅ READY' : '❌ BLOCKED'}\n`);
+
+  return {
+    success: allChecksPassed,
+    checks: {
+      usdcBalance: {
+        passed: hasEnoughUSDC,
+        required: usdcAmount,
+        available: usdcBalance.balance
+      },
+      ethBalance: {
+        passed: hasEnoughETH,
+        required: MIN_ETH_BALANCE,
+        available: ethBalance.balance
+      },
+      gasEstimate: {
+        passed: hasEnoughGas,
+        estimated: gasEstimate?.gasCostWithBuffer || 0,
+        available: ethBalance.balance
+      }
+    },
+    gasEstimate
+  };
+};
+
+/**
  * Approve USDC spending by the Aboki contract
  */
 const approveUSDCSpending = async (
@@ -168,7 +338,7 @@ const approveUSDCSpending = async (
     const walletClient = getAdminWalletClient(network);
     const publicClient = getPublicClient(network);
 
-    // Check current allowance (now with correct args: owner, spender)
+    // Check current allowance
     const currentAllowance = await publicClient.readContract({
       address: usdcAddress as `0x${string}`,
       abi: ERC20_ABI,
@@ -213,8 +383,7 @@ const approveUSDCSpending = async (
 };
 
 /**
- * Create order through Aboki contract
- * This transfers USDC from admin wallet → contract → user wallet
+ * Create order through Aboki contract (WITH PRE-FLIGHT CHECKS)
  */
 export const createAbokiOrder = async (
   usdcAmount: number,
@@ -241,16 +410,31 @@ export const createAbokiOrder = async (
     console.log(`   Admin Wallet: ${ADMIN_WALLET_ADDRESS}`);
     console.log(`   Contract: ${ABOKI_CONTRACT_ADDRESS}`);
 
-    // Step 1: Check admin balance
-    const balance = await getAdminUSDCBalance(network);
-    if (balance.balance < usdcAmount) {
-      throw new Error(`Insufficient admin balance. Need ${usdcAmount} USDC, have ${balance.balance} USDC`);
+    // CRITICAL: Perform comprehensive pre-flight checks
+    const preflightResult = await performPreflightChecks(usdcAmount, rate, userWalletAddress, network);
+
+    if (!preflightResult.success) {
+      const errors = [];
+      
+      if (!preflightResult.checks.usdcBalance.passed) {
+        errors.push(`Insufficient USDC: Need ${preflightResult.checks.usdcBalance.required} USDC, have ${preflightResult.checks.usdcBalance.available} USDC`);
+      }
+      
+      if (!preflightResult.checks.ethBalance.passed) {
+        errors.push(`Insufficient ETH for gas: Have ${preflightResult.checks.ethBalance.available.toFixed(6)} ETH, need at least ${MIN_ETH_BALANCE} ETH`);
+      }
+      
+      if (!preflightResult.checks.gasEstimate.passed) {
+        errors.push(`Insufficient ETH for estimated gas: Need ${preflightResult.checks.gasEstimate.estimated.toFixed(6)} ETH for gas`);
+      }
+
+      throw new Error(`Pre-flight checks failed: ${errors.join('; ')}`);
     }
 
-    // Step 2: Approve USDC spending
+    // Approve USDC spending
     await approveUSDCSpending(amountInWei, network);
 
-    // Step 3: Create order through contract
+    // Create order through contract
     console.log(`🎫 Creating order on contract...`);
     
     const hash = await walletClient.writeContract({
@@ -258,11 +442,11 @@ export const createAbokiOrder = async (
       abi: ABOKI_ABI,
       functionName: 'createOrder',
       args: [
-        usdcAddress as `0x${string}`,           // _token (USDC address)
-        amountInWei,                             // _amount
-        BigInt(Math.floor(rate * 100)),          // _rate (multiplied by 100 for precision)
-        ADMIN_WALLET_ADDRESS as `0x${string}`,   // _refundAddress (admin wallet)
-        userWalletAddress as `0x${string}`       // _liquidityProvider (user receives USDC)
+        usdcAddress as `0x${string}`,
+        amountInWei,
+        BigInt(Math.floor(rate * 100)),
+        ADMIN_WALLET_ADDRESS as `0x${string}`,
+        userWalletAddress as `0x${string}`
       ],
     });
 
@@ -275,13 +459,7 @@ export const createAbokiOrder = async (
     console.log('✅ Order created successfully!');
     console.log(`   Block: ${receipt.blockNumber}`);
     console.log(`   Gas Used: ${receipt.gasUsed}`);
-
-    // Extract orderId from logs (if needed)
-    let orderId = null;
-    if (receipt.logs && receipt.logs.length > 0) {
-      // The OrderCreated event should contain the orderId
-      console.log(`   Transaction logs: ${receipt.logs.length} events emitted`);
-    }
+    console.log(`   Gas Cost: ${Number(formatEther(receipt.gasUsed * receipt.effectiveGasPrice)).toFixed(6)} ETH`);
 
     const explorerUrl = network === 'base-mainnet'
       ? `https://basescan.org/tx/${hash}`
@@ -292,7 +470,6 @@ export const createAbokiOrder = async (
       transactionHash: hash,
       blockNumber: receipt.blockNumber.toString(),
       gasUsed: receipt.gasUsed.toString(),
-      orderId,
       explorerUrl,
       details: {
         usdcAmount,
@@ -342,6 +519,8 @@ export const verifyAdminWalletConfig = () => {
 
 export default {
   getAdminUSDCBalance,
+  getAdminETHBalance,
+  performPreflightChecks,
   createAbokiOrder,
   verifyAdminWalletConfig
 };

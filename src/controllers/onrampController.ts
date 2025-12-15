@@ -1,4 +1,4 @@
-// ============= src/controllers/onrampController.ts =============
+// ============= src/controllers/onrampController.ts (COMPLETE WITH GAS CHECKS) =============
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
@@ -8,6 +8,8 @@ import { NetworkType } from '../services/walletService';
 import { calculateOnrampRate } from '../services/rateService';
 import {
   getAdminUSDCBalance,
+  getAdminETHBalance,
+  performPreflightChecks,
   createAbokiOrder,
   verifyAdminWalletConfig
 } from '../services/adminWalletService';
@@ -246,31 +248,88 @@ export const initializeOnramp = async (req: Request, res: Response): Promise<voi
     // Get current onramp rate with dynamic calculation
     const rateData = await calculateOnrampRate(amount);
     
-    // Check if admin wallet has enough USDC liquidity
+    // Get user network
     const network = (user.wallet.network || 'base-mainnet') as NetworkType;
-    const adminBalance = await getAdminUSDCBalance(network);
-    
     const requiredUSDC = rateData.amountUSDC || 0;
+
+    // 🔍 CRITICAL: Comprehensive pre-flight checks (USDC + ETH + Gas)
+    console.log(`🔍 Running comprehensive pre-flight checks...`);
     
-    if (adminBalance.balance < requiredUSDC) {
-      console.error(`❌ Insufficient liquidity!`);
-      console.error(`   Required: ${requiredUSDC.toFixed(2)} USDC`);
-      console.error(`   Available: ${adminBalance.balance.toFixed(2)} USDC`);
-      
+    let preflightResult;
+    try {
+      preflightResult = await performPreflightChecks(
+        requiredUSDC,
+        rateData.onrampRate,
+        user.wallet.smartAccountAddress || user.wallet.ownerAddress,
+        network
+      );
+    } catch (preflightError: any) {
+      console.error(`❌ Pre-flight checks failed:`, preflightError);
       res.status(503).json({
         success: false,
-        error: 'Insufficient liquidity. Please try a smaller amount or contact support.',
+        error: 'Service temporarily unavailable. Please try again in a few minutes.',
         details: {
-          required: requiredUSDC.toFixed(2),
-          available: adminBalance.balance.toFixed(2)
+          reason: 'System checks failed'
         }
       });
       return;
     }
 
-    console.log(`✅ Liquidity check passed`);
-    console.log(`   Required: ${requiredUSDC.toFixed(2)} USDC`);
-    console.log(`   Available: ${adminBalance.balance.toFixed(2)} USDC`);
+    if (!preflightResult.success) {
+      // Handle USDC insufficiency
+      if (!preflightResult.checks.usdcBalance.passed) {
+        console.error(`❌ Insufficient USDC liquidity!`);
+        console.error(`   Required: ${requiredUSDC.toFixed(2)} USDC`);
+        console.error(`   Available: ${preflightResult.checks.usdcBalance.available.toFixed(2)} USDC`);
+        
+        res.status(503).json({
+          success: false,
+          error: 'Insufficient liquidity. Please try a smaller amount or contact support.',
+          details: {
+            required: requiredUSDC.toFixed(2),
+            available: preflightResult.checks.usdcBalance.available.toFixed(2)
+          }
+        });
+        return;
+      }
+
+      // Handle ETH insufficiency (minimum balance)
+      if (!preflightResult.checks.ethBalance.passed) {
+        console.error(`❌ Insufficient ETH for gas fees!`);
+        console.error(`   Available: ${preflightResult.checks.ethBalance.available.toFixed(6)} ETH`);
+        console.error(`   Minimum Required: ${preflightResult.checks.ethBalance.required} ETH`);
+        
+        res.status(503).json({
+          success: false,
+          error: 'Service temporarily unavailable. Our system is being refilled. Please try again in a few minutes.',
+          details: {
+            reason: 'Insufficient gas funds'
+          }
+        });
+        return;
+      }
+
+      // Handle gas estimate insufficiency
+      if (!preflightResult.checks.gasEstimate.passed) {
+        console.error(`❌ Insufficient ETH for estimated gas cost!`);
+        console.error(`   Estimated Gas Cost: ${preflightResult.checks.gasEstimate.estimated.toFixed(6)} ETH`);
+        console.error(`   Available: ${preflightResult.checks.gasEstimate.available.toFixed(6)} ETH`);
+        
+        res.status(503).json({
+          success: false,
+          error: 'Service temporarily unavailable. Our system is being refilled. Please try again in a few minutes.',
+          details: {
+            reason: 'Insufficient gas funds for transaction'
+          }
+        });
+        return;
+      }
+    }
+
+    console.log(`✅ All pre-flight checks passed`);
+    console.log(`   USDC: ${preflightResult.checks.usdcBalance.available.toFixed(2)} USDC available`);
+    console.log(`   ETH: ${preflightResult.checks.ethBalance.available.toFixed(6)} ETH available`);
+    console.log(`   Gas: ${preflightResult.gasEstimate?.gasCostWithBuffer.toFixed(6)} ETH estimated`);
 
     // Generate unique payment reference
     const timestamp = Date.now();
@@ -352,9 +411,16 @@ export const initializeOnramp = async (req: Request, res: Response): Promise<voi
           dailyLimit: DAILY_LIMIT_NGN
         },
         liquidity: {
-          available: adminBalance.balance.toFixed(2),
-          required: requiredUSDC.toFixed(2),
-          sufficient: true
+          usdc: {
+            available: preflightResult.checks.usdcBalance.available.toFixed(2),
+            required: requiredUSDC.toFixed(2),
+            sufficient: true
+          },
+          gas: {
+            available: preflightResult.checks.ethBalance.available.toFixed(6),
+            estimated: preflightResult.gasEstimate?.gasCostWithBuffer.toFixed(6) || '0',
+            sufficient: true
+          }
         },
         monnifyConfig,
         rateSource: rateData.source
@@ -556,6 +622,8 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       console.error(`   User: ${user.username}`);
       console.error(`   Amount: ${transaction.usdcAmount} USDC`);
       console.error(`   Wallet: ${transaction.walletAddress}`);
+      console.error(`   Payment Reference: ${paymentReference}`);
+      console.error(`   Monnify Reference: ${transactionReference}`);
 
       res.status(500).json({
         success: false,

@@ -1,4 +1,4 @@
-// ============= src/services/rateService.ts =============
+// ============= src/services/rateService.ts (FIXED) =============
 import axios from 'axios';
 
 // Configuration
@@ -56,8 +56,9 @@ interface RateResult {
 
 /**
  * Fetch USD/NGN rate from Paycrest API (USDC)
+ * FIXED: Request rate for 1 USDC instead of 10 to get per-unit rate
  */
-async function fetchPaycrestRate(amount = 10): Promise<RateResult> {
+async function fetchPaycrestRate(amount = 1): Promise<RateResult> {
   try {
     const url = `${PAYCREST_API_URL}/rates/USDC/${amount}/NGN`;
     
@@ -70,13 +71,20 @@ async function fetchPaycrestRate(amount = 10): Promise<RateResult> {
     });
     
     if (response.data && response.data.status === 'success' && response.data.data) {
-      const parsedRate = typeof response.data.data === 'string' 
+      let parsedRate = typeof response.data.data === 'string' 
         ? parseFloat(response.data.data) 
         : (response.data.data.rate || parseFloat(response.data.data));
+      
+      // If we requested multiple USDC, divide by amount to get rate per 1 USDC
+      if (amount > 1) {
+        parsedRate = parsedRate / amount;
+      }
         
       if (isNaN(parsedRate) || parsedRate <= 0) {
         throw new Error('Invalid rate value from Paycrest');
       }
+      
+      console.log(`✅ Paycrest rate: ₦${parsedRate.toFixed(2)} per 1 USDC`);
       
       return { rate: parsedRate, source: 'Paycrest', status: 'success' };
     } else {
@@ -151,9 +159,9 @@ export async function getUsdNgnRateWithFallback(): Promise<RateResult> {
   // 2. Check expired cache for fallback
   cachedData = cache.get(cacheKey, true);
   
-  // 3. Try Paycrest (Primary)
+  // 3. Try Paycrest (Primary) - FIXED: Request rate for 1 USDC
   try {
-    const result = await fetchPaycrestRate(10);
+    const result = await fetchPaycrestRate(1);
     cache.set(cacheKey, result, 1800); // Cache for 30 minutes
     return {
       ...result,
@@ -257,6 +265,14 @@ export async function calculateOnrampRate(amountNGN?: number): Promise<OnrampRat
       
       // Calculate effective rate (what user actually pays per USDC)
       effectiveRate = totalPayable / amountUSDC;
+      
+      // Debug log
+      console.log(`💰 Rate Calculation for ₦${amountNGN.toLocaleString()}:`);
+      console.log(`   Base Rate: ₦${baseRate.toFixed(2)}`);
+      console.log(`   Onramp Rate: ₦${onrampRate.toFixed(2)}`);
+      console.log(`   USDC Amount: ${amountUSDC.toFixed(6)} USDC`);
+      console.log(`   Fee: ₦${feeAmount.toFixed(2)}`);
+      console.log(`   Total Payable: ₦${totalPayable.toFixed(2)}`);
     }
     
     return {

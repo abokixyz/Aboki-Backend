@@ -436,38 +436,139 @@ export const initializeOnramp = async (req: Request, res: Response): Promise<voi
 };
 
 /**
- * @desc    Handle Monnify webhook - WITH SMART CONTRACT INTEGRATION
+ * @desc    Handle Monnify webhook - FIXED VERSION
  * @route   POST /api/onramp/webhook
  * @access  Public (but verified)
  */
 export const handleMonnifyWebhook = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const payload = req.body;
-    
-    console.log('📨 Received Monnify webhook');
-
-    // Verify signature
-    const signature = req.headers['monnify-signature'] as string;
-    if (signature && !verifyMonnifySignature(payload, signature)) {
-      console.error('❌ Invalid webhook signature');
-      res.status(401).json({
+    try {
+      const payload = req.body;
+      
+      console.log('📨 Received Monnify webhook');
+      console.log('📦 Event Type:', payload.eventType);
+  
+      // Verify signature (use full payload for signature verification)
+      const signature = req.headers['monnify-signature'] as string;
+      if (signature && !verifyMonnifySignature(payload, signature)) {
+        console.error('❌ Invalid webhook signature');
+        res.status(401).json({
+          success: false,
+          error: 'Invalid signature'
+        });
+        return;
+      }
+  
+      // Verify IP
+      if (!isValidMonnifyIP(req)) {
+        const clientIP = req.ip || req.headers['x-forwarded-for'];
+        console.error(`❌ Webhook from unauthorized IP: ${clientIP}`);
+        res.status(403).json({
+          success: false,
+          error: 'Forbidden'
+        });
+        return;
+      }
+  
+      // ✅ FIX: Extract eventData - Monnify wraps data in eventData object
+      const eventData = payload.eventData;
+      
+      if (!eventData) {
+        console.error('❌ Missing eventData in webhook payload');
+        res.status(400).json({
+          success: false,
+          error: 'Invalid webhook payload: missing eventData'
+        });
+        return;
+      }
+  
+      // ✅ FIX: Extract fields from eventData, not root payload
+      const {
+        transactionReference,
+        paymentReference,
+        amountPaid,
+        totalPayable,
+        paidOn,
+        paymentStatus,
+        paymentMethod,
+        currency,
+        customer,
+        metaData // This is where your custom data should be
+      } = eventData;
+  
+      // Extract customer info (nested in customer object)
+      const customerEmail = customer?.email;
+      const customerName = customer?.name;
+  
+      console.log('📋 Webhook Details:');
+      console.log(`   Event Type: ${payload.eventType}`);
+      console.log(`   Transaction Ref: ${transactionReference}`);
+      console.log(`   Payment Ref: ${paymentReference}`);
+      console.log(`   Amount Paid: ₦${amountPaid}`);
+      console.log(`   Status: ${paymentStatus}`);
+      console.log(`   Method: ${paymentMethod}`);
+  
+      // Validate required fields
+      if (!paymentReference || !paymentStatus) {
+        console.error('❌ Missing required webhook fields');
+        console.error('📦 Received eventData:', JSON.stringify(eventData, null, 2));
+        res.status(400).json({
+          success: false,
+          error: 'Invalid webhook payload: missing required fields'
+        });
+        return;
+      }
+  
+      // Find transaction by paymentReference
+      const transaction = await OnrampTransaction.findOne({ paymentReference });
+  
+      if (!transaction) {
+        console.error(`❌ Transaction not found for reference: ${paymentReference}`);
+        console.log(`📋 Checking if this is a metadata reference...`);
+        
+        // ✅ ALTERNATIVE: Check metadata for custom payment reference
+        // Monnify might use their own reference, but store yours in metadata
+        if (metaData && metaData.paymentReference) {
+          console.log(`🔍 Found custom reference in metadata: ${metaData.paymentReference}`);
+          const txByMetadata = await OnrampTransaction.findOne({ 
+            paymentReference: metaData.paymentReference 
+          });
+          
+          if (txByMetadata) {
+            console.log(`✅ Transaction found via metadata reference`);
+            // Continue processing with this transaction
+            return processTransaction(txByMetadata, eventData, res);
+          }
+        }
+        
+        res.status(404).json({
+          success: false,
+          error: 'Transaction not found'
+        });
+        return;
+      }
+  
+      // Process the transaction
+      return processTransaction(transaction, eventData, res);
+  
+    } catch (error: any) {
+      console.error('❌ Webhook processing error:', error);
+      console.error('Stack:', error.stack);
+      
+      res.status(500).json({
         success: false,
-        error: 'Invalid signature'
+        error: error.message || 'Webhook processing failed'
       });
-      return;
     }
-
-    // Verify IP
-    if (!isValidMonnifyIP(req)) {
-      const clientIP = req.ip || req.headers['x-forwarded-for'];
-      console.error(`❌ Webhook from unauthorized IP: ${clientIP}`);
-      res.status(403).json({
-        success: false,
-        error: 'Forbidden'
-      });
-      return;
-    }
-
+  };
+  
+  /**
+   * Helper function to process the transaction
+   */
+  async function processTransaction(
+    transaction: any,
+    eventData: any,
+    res: Response
+  ): Promise<void> {
     const {
       transactionReference,
       paymentReference,
@@ -477,32 +578,9 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       paymentStatus,
       paymentMethod,
       currency,
-      customerEmail,
-      customerName
-    } = payload;
-
-    // Validate payload
-    if (!paymentReference || !paymentStatus) {
-      console.error('❌ Missing required webhook fields');
-      res.status(400).json({
-        success: false,
-        error: 'Invalid webhook payload'
-      });
-      return;
-    }
-
-    // Find transaction
-    const transaction = await OnrampTransaction.findOne({ paymentReference });
-
-    if (!transaction) {
-      console.error(`❌ Transaction not found for reference: ${paymentReference}`);
-      res.status(404).json({
-        success: false,
-        error: 'Transaction not found'
-      });
-      return;
-    }
-
+      customer
+    } = eventData;
+  
     // Idempotency check
     if (transaction.status === 'COMPLETED') {
       console.log(`✅ Transaction already completed (idempotency): ${paymentReference}`);
@@ -512,13 +590,13 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       });
       return;
     }
-
+  
     // Update basic transaction info
     transaction.monnifyReference = transactionReference;
     transaction.amountPaidNGN = amountPaid;
     transaction.paymentMethod = paymentMethod;
     transaction.paidAt = paidOn ? new Date(paidOn) : new Date();
-
+  
     // Handle non-successful payment
     if (paymentStatus !== 'PAID') {
       transaction.status = paymentStatus === 'USER_CANCELLED' ? 'CANCELLED' : 'FAILED';
@@ -532,12 +610,12 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       });
       return;
     }
-
+  
     // Verify amount paid
     const TOLERANCE_NGN = 1;
     const expectedAmount = transaction.amountNGN + transaction.fee;
     const amountDifference = Math.abs(amountPaid - expectedAmount);
-
+  
     if (amountDifference > TOLERANCE_NGN) {
       console.error(`❌ AMOUNT MISMATCH DETECTED!`);
       console.error(`   Expected: ₦${expectedAmount} (₦${transaction.amountNGN} + ₦${transaction.fee} fee)`);
@@ -553,7 +631,7 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       });
       return;
     }
-
+  
     // Get user
     const user = await User.findById(transaction.userId).select('+wallet.encryptedWalletData');
     
@@ -570,12 +648,12 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       });
       return;
     }
-
+  
     console.log(`💰 Creating smart contract order`);
     console.log(`   Amount: ${transaction.usdcAmount} USDC`);
     console.log(`   Rate: ₦${transaction.exchangeRate}`);
     console.log(`   To: ${transaction.walletAddress}`);
-
+  
     try {
       // Use smart contract to transfer USDC from admin wallet to user
       const network = (user.wallet.network || 'base-mainnet') as NetworkType;
@@ -586,17 +664,17 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
         transaction.walletAddress,
         network
       );
-
+  
       transaction.status = 'COMPLETED';
       transaction.transactionHash = result.transactionHash;
       transaction.completedAt = new Date();
       await transaction.save();
-
+  
       console.log(`✅ USDC CREDITED SUCCESSFULLY VIA SMART CONTRACT`);
       console.log(`   Transaction Hash: ${result.transactionHash}`);
       console.log(`   Block: ${result.blockNumber}`);
       console.log(`   Explorer: ${result.explorerUrl}`);
-
+  
       res.status(200).json({
         success: true,
         message: 'USDC credited successfully',
@@ -616,7 +694,7 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       transaction.status = 'FAILED';
       transaction.failureReason = `Smart contract order failed: ${sendError.message}`;
       await transaction.save();
-
+  
       console.error('🚨 URGENT: Manual intervention required!');
       console.error(`   Transaction ID: ${transaction._id}`);
       console.error(`   User: ${user.username}`);
@@ -624,77 +702,14 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
       console.error(`   Wallet: ${transaction.walletAddress}`);
       console.error(`   Payment Reference: ${paymentReference}`);
       console.error(`   Monnify Reference: ${transactionReference}`);
-
+  
       res.status(500).json({
         success: false,
         error: 'Failed to credit USDC. Support team notified.'
       });
     }
-  } catch (error: any) {
-    console.error('❌ Webhook processing error:', error);
-    
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Webhook processing failed'
-    });
   }
-};
-
-/**
- * @desc    Verify payment status
- * @route   GET /api/onramp/verify/:reference
- * @access  Private
- */
-export const verifyPayment = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { reference } = req.params;
-
-    const transaction = await OnrampTransaction.findOne({
-      paymentReference: reference,
-      userId: req.user?.id
-    });
-
-    if (!transaction) {
-      res.status(404).json({
-        success: false,
-        error: 'Transaction not found'
-      });
-      return;
-    }
-
-    // Build explorer URL if transaction hash exists
-    let explorerUrl;
-    if (transaction.transactionHash) {
-      explorerUrl = `https://basescan.org/tx/${transaction.transactionHash}`;
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        transactionId: transaction._id,
-        paymentReference: transaction.paymentReference,
-        monnifyReference: transaction.monnifyReference,
-        status: transaction.status,
-        amountNGN: transaction.amountNGN,
-        amountPaidNGN: transaction.amountPaidNGN,
-        usdcAmount: transaction.usdcAmount,
-        transactionHash: transaction.transactionHash,
-        explorerUrl,
-        createdAt: transaction.createdAt,
-        paidAt: transaction.paidAt,
-        completedAt: transaction.completedAt,
-        failureReason: transaction.failureReason
-      }
-    });
-  } catch (error: any) {
-    console.error('❌ Error verifying payment:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Verification failed'
-    });
-  }
-};
-
+  
 /**
  * @desc    Get onramp transaction history
  * @route   GET /api/onramp/history

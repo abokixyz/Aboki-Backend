@@ -14,7 +14,8 @@ import authRoutes from './routes/authRoutes';
 import userRoutes from './routes/userRoutes';
 import inviteRoutes from './routes/inviteRoutes';
 import walletRoutes from './routes/walletRoutes';
-import onrampRoutes from './routes/onrampRoutes'
+import onrampRoutes from './routes/onrampRoutes';
+import transferRoutes from './routes/transferRoutes';
 
 // Initialize express app
 const app: Application = express();
@@ -58,6 +59,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/onramp', onrampRoutes);
+app.use('/api/transfer', transferRoutes);
 
 // Health check
 app.get('/', (req: Request, res: Response) => {
@@ -70,6 +72,8 @@ app.get('/', (req: Request, res: Response) => {
       users: '/api/users',
       invites: '/api/invites',
       wallet: '/api/wallet',
+      onramp: '/api/onramp',
+      transfer: '/api/transfer',
       docs: '/api-docs'
     }
   });
@@ -86,6 +90,8 @@ app.use((req: Request, res: Response) => {
       '/api/users',
       '/api/invites',
       '/api/wallet',
+      '/api/onramp',
+      '/api/transfer',
       '/api-docs'
     ]
   });
@@ -107,17 +113,19 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`
-  ╔═══════════════════════════════════════════════════════╗
-  ║                                                       ║
-  ║   🚀 Server running on port ${PORT}                     ║
-  ║                                                       ║
-  ║   📚 API Documentation: https://apis.aboki.xyz/api-docs  ║
-  ║   🔐 Auth Endpoints:    https://apis.aboki.xyz/api/auth  ║
-  ║   👥 User Endpoints:    https://apis.aboki.xyz/api/users ║
-  ║   🎫 Invite Endpoints:  https://apis.aboki.xyz/api/invites ║
-  ║   💰 Wallet Endpoints:  https://apis.aboki.xyz/api/wallet ║
-  ║                                                       ║
-  ╚═══════════════════════════════════════════════════════╝
+  ╔═══════════════════════════════════════════════════════════╗
+  ║                                                           ║
+  ║   🚀 Server running on port ${PORT}                         ║
+  ║                                                           ║
+  ║   📚 API Documentation: https://apis.aboki.xyz/api-docs      ║
+  ║   🔐 Auth Endpoints:    https://apis.aboki.xyz/api/auth      ║
+  ║   👥 User Endpoints:    https://apis.aboki.xyz/api/users     ║
+  ║   🎫 Invite Endpoints:  https://apis.aboki.xyz/api/invites   ║
+  ║   💰 Wallet Endpoints:  https://apis.aboki.xyz/api/wallet    ║
+  ║   💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp    ║
+  ║   💸 Transfer Endpoints: https://apis.aboki.xyz/api/transfer ║
+  ║                                                           ║
+  ╚═══════════════════════════════════════════════════════════╝
   `);
 });
 

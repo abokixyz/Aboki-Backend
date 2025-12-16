@@ -711,6 +711,61 @@ export const handleMonnifyWebhook = async (req: Request, res: Response): Promise
   }
   
 /**
+ * @desc    Verify payment status
+ * @route   GET /api/onramp/verify/:reference
+ * @access  Private
+ */
+export const verifyPayment = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { reference } = req.params;
+
+    const transaction = await OnrampTransaction.findOne({
+      paymentReference: reference,
+      userId: req.user?.id
+    });
+
+    if (!transaction) {
+      res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+      return;
+    }
+
+    // Build explorer URL if transaction hash exists
+    let explorerUrl;
+    if (transaction.transactionHash) {
+      explorerUrl = `https://basescan.org/tx/${transaction.transactionHash}`;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: transaction._id,
+        paymentReference: transaction.paymentReference,
+        monnifyReference: transaction.monnifyReference,
+        status: transaction.status,
+        amountNGN: transaction.amountNGN,
+        amountPaidNGN: transaction.amountPaidNGN,
+        usdcAmount: transaction.usdcAmount,
+        transactionHash: transaction.transactionHash,
+        explorerUrl,
+        createdAt: transaction.createdAt,
+        paidAt: transaction.paidAt,
+        completedAt: transaction.completedAt,
+        failureReason: transaction.failureReason
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error verifying payment:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Verification failed'
+    });
+  }
+};
+
+/**
  * @desc    Get onramp transaction history
  * @route   GET /api/onramp/history
  * @access  Private

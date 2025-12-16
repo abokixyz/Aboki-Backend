@@ -1,9 +1,10 @@
-// ============= src/controllers/transferController.ts =============
+// ============= src/controllers/transferController.ts (UPDATED) =============
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import User from '../models/User';
 import Transfer from '../models/Transfer';
 import InviteCode from '../models/InviteCode';
+import Contact from '../models/Contact';
 import { sendUSDCWithPaymaster } from '../services/paymasterService';
 import { NetworkType } from '../services/walletService';
 import { getUSDCBalance } from '../services/walletService';
@@ -13,6 +14,142 @@ const LINK_EXPIRY_DAYS = 30;
 function generateLinkCode(): string {
   return `ABOKI_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`.toUpperCase();
 }
+
+/**
+ * @desc    Validate if username exists in the system
+ * @route   GET /api/transfer/validate-username/:username
+ * @access  Private
+ */
+export const validateUsername = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { username } = req.params;
+
+    if (!username || username.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        error: 'Username is required'
+      });
+      return;
+    }
+
+    const user = await User.findOne({ 
+      username: username.toLowerCase() 
+    }).select('username name');
+
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: `User @${username} not found`,
+        exists: false
+      });
+      return;
+    }
+
+    const requestingUser = await User.findById(req.user?.id);
+    if (requestingUser?._id.toString() === user._id.toString()) {
+      res.status(400).json({
+        success: false,
+        error: 'Cannot validate your own username',
+        exists: true
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      exists: true,
+      data: {
+        username: user.username,
+        name: user.name
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error validating username:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Server Error'
+    });
+  }
+};
+
+/**
+ * @desc    Get my contacts (users I've interacted with)
+ * @route   GET /api/transfer/contacts
+ * @access  Private
+ */
+export const getMyContacts = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    
+    const contacts = await Contact.find({ userId })
+      .populate('contactUser', 'username name wallet')
+      .sort({ lastInteractedAt: -1 });
+
+    const formattedContacts = contacts.map(c => {
+      const contactUser = c.contactUser as any;
+      return {
+        id: c._id,
+        username: contactUser?.username,
+        name: contactUser?.name,
+        address: c.address,
+        interactionCount: c.interactionCount,
+        lastInteractedAt: c.lastInteractedAt,
+        transferCount: c.transferCount,
+        totalAmountTransferred: c.totalAmountTransferred
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: formattedContacts.length,
+      data: formattedContacts
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching contacts:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Server Error'
+    });
+  }
+};
+
+/**
+ * @desc    Get recent contacts (quick send suggestions)
+ * @route   GET /api/transfer/contacts/recent
+ * @access  Private
+ */
+export const getRecentContacts = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.id;
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 5;
+
+    const contacts = await Contact.find({ userId })
+      .populate('contactUser', 'username name')
+      .sort({ lastInteractedAt: -1 })
+      .limit(limit);
+
+    const formattedContacts = contacts.map(c => {
+      const contactUser = c.contactUser as any;
+      return {
+        username: contactUser?.username,
+        name: contactUser?.name,
+        lastInteractedAt: c.lastInteractedAt
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: formattedContacts.length,
+      data: formattedContacts
+    });
+  } catch (error: any) {
+    console.error('❌ Error fetching recent contacts:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Server Error'
+    });
+  }
+};
 
 /**
  * @desc    Send USDC to another user by username
@@ -49,7 +186,6 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    // Validate encrypted wallet data exists
     if (!sender.wallet.encryptedWalletData) {
       res.status(400).json({
         success: false,
@@ -58,11 +194,21 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
       return;
     }
 
+    // VALIDATE: Check if recipient username exists
     const recipient = await User.findOne({ username: username.toLowerCase() });
-    if (!recipient || !recipient.wallet) {
+    if (!recipient) {
       res.status(404).json({
         success: false,
-        error: `User @${username} not found or doesn't have a wallet`
+        error: `User @${username} not found in our system`,
+        exists: false
+      });
+      return;
+    }
+
+    if (!recipient.wallet) {
+      res.status(404).json({
+        success: false,
+        error: `User @${username} doesn't have a wallet yet`
       });
       return;
     }
@@ -120,6 +266,9 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
       transfer.status = 'COMPLETED';
       transfer.transactionHash = result.transactionHash;
       await transfer.save();
+
+      // CONTACT TRACKING: Update or create contact record
+      await updateContact(sender._id, recipient._id, recipient.username, recipientAddress, amountNum);
 
       console.log(`✅ Transfer completed: ${result.transactionHash}`);
 
@@ -200,7 +349,6 @@ export const sendToExternal = async (req: Request, res: Response): Promise<void>
       return;
     }
 
-    // Validate encrypted wallet data exists
     if (!sender.wallet.encryptedWalletData) {
       res.status(400).json({
         success: false,
@@ -334,7 +482,6 @@ export const createPaymentLink = async (req: Request, res: Response): Promise<vo
       return;
     }
 
-    // Get sender's invite code (they'll use this to invite the recipient)
     const senderInviteCode = await InviteCode.findOne({ createdBy: sender._id });
 
     const linkCode = generateLinkCode();
@@ -358,13 +505,11 @@ export const createPaymentLink = async (req: Request, res: Response): Promise<vo
       pendingClaimByNewUser: true
     });
 
-    // The claim URL includes the sender's invite code for seamless signup
     const claimUrl = `${process.env.FRONTEND_URL || 'https://aboki.xyz'}/claim/${linkCode}${senderInviteCode ? `?invite=${senderInviteCode.code}` : ''}`;
 
     console.log(`🔗 Payment link created by @${sender.username}`);
     console.log(`   Amount: ${amountNum} USDC`);
     console.log(`   Code: ${linkCode}`);
-    console.log(`   Invite: ${senderInviteCode?.code || 'none'}`);
 
     res.status(201).json({
       success: true,
@@ -411,7 +556,6 @@ export const getPaymentLinkDetails = async (req: Request, res: Response): Promis
       return;
     }
 
-    // Get sender's invite code for signup flow
     const senderInviteCode = await InviteCode.findOne({ createdBy: transfer.fromUser._id });
 
     const isExpired = transfer.linkExpiry && new Date() > transfer.linkExpiry;
@@ -431,7 +575,6 @@ export const getPaymentLinkDetails = async (req: Request, res: Response): Promis
         claimedAt: transfer.claimedAt,
         expiresAt: transfer.linkExpiry,
         transactionHash: transfer.transactionHash,
-        // Include invite code for new user signup
         inviteCode: senderInviteCode?.code || null,
         requiresSignup: !isClaimed && !isExpired
       }
@@ -513,7 +656,6 @@ export const claimPaymentLink = async (req: Request, res: Response): Promise<voi
       return;
     }
 
-    // Validate encrypted wallet data exists
     if (!sender.wallet.encryptedWalletData) {
       res.status(500).json({
         success: false,
@@ -527,7 +669,7 @@ export const claimPaymentLink = async (req: Request, res: Response): Promise<voi
 
     console.log(`🎁 Claiming payment link`);
     console.log(`   From: @${transfer.fromUsername}`);
-    console.log(`   To: @${claimer.username} (NEW USER: ${transfer.pendingClaimByNewUser})`);
+    console.log(`   To: @${claimer.username}`);
     console.log(`   Amount: ${transfer.amount} USDC`);
 
     try {
@@ -549,6 +691,9 @@ export const claimPaymentLink = async (req: Request, res: Response): Promise<voi
       transfer.claimedAt = new Date();
       transfer.pendingClaimByNewUser = false;
       await transfer.save();
+
+      // CONTACT TRACKING: Update sender's contacts
+      await updateContact(sender._id, claimer._id, claimer.username, claimerAddress, transfer.amount);
 
       console.log(`✅ Payment claimed: ${result.transactionHash}`);
 
@@ -681,7 +826,49 @@ export const cancelPaymentLink = async (req: Request, res: Response): Promise<vo
   }
 };
 
+/**
+ * HELPER FUNCTION: Update or create contact record
+ */
+async function updateContact(
+  userId: any,
+  contactUserId: any,
+  contactUsername: string,
+  contactAddress: string,
+  transferAmount: number
+): Promise<void> {
+  try {
+    const existingContact = await Contact.findOne({
+      userId,
+      contactUser: contactUserId
+    });
+
+    if (existingContact) {
+      existingContact.interactionCount += 1;
+      existingContact.transferCount += 1;
+      existingContact.totalAmountTransferred += transferAmount;
+      existingContact.lastInteractedAt = new Date();
+      await existingContact.save();
+    } else {
+      await Contact.create({
+        userId,
+        contactUser: contactUserId,
+        username: contactUsername,
+        address: contactAddress,
+        interactionCount: 1,
+        transferCount: 1,
+        totalAmountTransferred: transferAmount,
+        lastInteractedAt: new Date()
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error updating contact:', error);
+  }
+}
+
 export default {
+  validateUsername,
+  getMyContacts,
+  getRecentContacts,
   sendToUsername,
   sendToExternal,
   createPaymentLink,

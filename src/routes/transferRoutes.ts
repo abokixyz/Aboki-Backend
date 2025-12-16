@@ -1,6 +1,9 @@
-// ============= src/routes/transferRoutes.ts (COMPLETE) =============
+// ============= src/routes/transferRoutes.ts (UPDATED) =============
 import { Router } from 'express';
 import {
+  validateUsername,
+  getMyContacts,
+  getRecentContacts,
   sendToUsername,
   sendToExternal,
   createPaymentLink,
@@ -15,9 +18,118 @@ const router = Router();
 
 /**
  * @swagger
+ * /api/transfer/validate-username/{username}:
+ *   get:
+ *     summary: Validate if username exists in the system
+ *     tags: [Transfer - Validation]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: username
+ *         required: true
+ *         schema:
+ *           type: string
+ *         example: "johndoe"
+ *     responses:
+ *       200:
+ *         description: Username exists and is valid
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               exists: true
+ *               data:
+ *                 username: "johndoe"
+ *                 name: "John Doe"
+ *       404:
+ *         description: Username not found
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: false
+ *               exists: false
+ *               error: "User @johndoe not found"
+ */
+router.get('/validate-username/:username', protect, validateUsername);
+
+/**
+ * @swagger
+ * /api/transfer/contacts:
+ *   get:
+ *     summary: Get all my contacts (users I've transferred to)
+ *     description: Retrieve list of all users you've had transfers with, sorted by last interaction
+ *     tags: [Contacts]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Contacts retrieved successfully
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               count: 3
+ *               data:
+ *                 - id: "507f1f77bcf86cd799439011"
+ *                   username: "alice"
+ *                   name: "Alice Johnson"
+ *                   address: "0x742d35Cc..."
+ *                   interactionCount: 5
+ *                   transferCount: 5
+ *                   totalAmountTransferred: 125.50
+ *                   lastInteractedAt: "2024-12-15T10:30:00Z"
+ *                 - id: "507f1f77bcf86cd799439012"
+ *                   username: "bob"
+ *                   name: "Bob Smith"
+ *                   address: "0x1234567..."
+ *                   interactionCount: 2
+ *                   transferCount: 2
+ *                   totalAmountTransferred: 50.00
+ *                   lastInteractedAt: "2024-12-10T15:45:00Z"
+ */
+router.get('/contacts', protect, getMyContacts);
+
+/**
+ * @swagger
+ * /api/transfer/contacts/recent:
+ *   get:
+ *     summary: Get recent contacts (quick send suggestions)
+ *     description: Get your most recent contacts for quick access and sending
+ *     tags: [Contacts]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Number of recent contacts to return
+ *     responses:
+ *       200:
+ *         description: Recent contacts retrieved
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               count: 3
+ *               data:
+ *                 - username: "alice"
+ *                   name: "Alice Johnson"
+ *                   lastInteractedAt: "2024-12-15T10:30:00Z"
+ *                 - username: "bob"
+ *                   name: "Bob Smith"
+ *                   lastInteractedAt: "2024-12-10T15:45:00Z"
+ */
+router.get('/contacts/recent', protect, getRecentContacts);
+
+/**
+ * @swagger
  * /api/transfer/send/username:
  *   post:
  *     summary: Send USDC to another user by username
+ *     description: Transfer USDC to another user in the system (validates username exists)
  *     tags: [Transfers]
  *     security:
  *       - bearerAuth: []
@@ -43,10 +155,27 @@ const router = Router();
  *     responses:
  *       200:
  *         description: Transfer successful
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               message: "Successfully sent 10.50 USDC to @johndoe"
+ *               data:
+ *                 transferId: "507f1f77bcf86cd799439011"
+ *                 from: "alice"
+ *                 to: "johndoe"
+ *                 amount: 10.50
+ *                 transactionHash: "0x123abc..."
  *       400:
  *         description: Invalid input or insufficient balance
  *       404:
  *         description: User not found
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: false
+ *               exists: false
+ *               error: "User @johndoe not found in our system"
  *       500:
  *         description: Transfer failed
  */

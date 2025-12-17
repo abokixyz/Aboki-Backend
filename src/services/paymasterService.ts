@@ -1,25 +1,31 @@
-// ============= src/services/paymasterService.ts (PIMLICO INTEGRATED) =============
+// ============= src/services/paymasterService.ts (ALCHEMY GAS MANAGER) =============
 
-import { createPublicClient, createWalletClient, http, parseUnits, encodeFunctionData } from 'viem';
-import { base, baseSepolia } from 'viem/chains';
+import { createPublicClient, createWalletClient, http, parseUnits, encodeFunctionData, type Address, type Hex } from 'viem';
+import { base } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import crypto from 'crypto';
 import { NetworkType } from './walletService';
 
 // ============= ENVIRONMENT VARIABLES =============
-const PIMLICO_API_KEY = process.env.PIMLICO_API_KEY || '';
+const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || '';
+const ALCHEMY_GAS_POLICY_ID = process.env.ALCHEMY_GAS_POLICY_ID || '';
 const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || '';
 
-// Validate required environment variables
-if (!PIMLICO_API_KEY) {
-  console.warn('⚠️ WARNING: PIMLICO_API_KEY not configured - users will pay their own gas');
+if (!ALCHEMY_API_KEY) {
+  console.warn('⚠️ WARNING: ALCHEMY_API_KEY not configured - users will pay gas');
+}
+
+if (!ALCHEMY_GAS_POLICY_ID) {
+  console.warn('⚠️ WARNING: ALCHEMY_GAS_POLICY_ID not configured - gas sponsorship disabled');
 }
 
 if (!WALLET_ENCRYPTION_KEY) {
-  throw new Error('❌ CRITICAL: WALLET_ENCRYPTION_KEY must be set in .env');
+  throw new Error('❌ WALLET_ENCRYPTION_KEY must be set in .env');
 }
 
-// ============= USDC CONTRACT =============
+// ============= CONFIGURATION =============
+const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
 const USDC_ABI = [
   {
     name: 'transfer',
@@ -40,29 +46,20 @@ const USDC_ABI = [
   }
 ] as const;
 
-const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-
 // ============= UTILITY FUNCTIONS =============
 
-function getChain(network: NetworkType) {
-  return network === 'base-mainnet' ? base : baseSepolia;
-}
-
 function getRpcUrl(network: NetworkType): string {
+  if (ALCHEMY_API_KEY) {
+    return `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
+  }
   return network === 'base-mainnet'
     ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
     : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 }
 
-function getPimlicoUrl(network: NetworkType): string {
-  // Base mainnet chainId = 8453, Base Sepolia = 84532
-  const chainId = network === 'base-mainnet' ? '8453' : '84532';
-  return `https://api.pimlico.io/v2/${chainId}/rpc?apikey=${PIMLICO_API_KEY}`;
-}
-
 function decryptPrivateKey(encryptedKey: string): string {
   if (!WALLET_ENCRYPTION_KEY) {
-    throw new Error('WALLET_ENCRYPTION_KEY environment variable not set');
+    throw new Error('WALLET_ENCRYPTION_KEY not set');
   }
 
   try {
@@ -83,81 +80,89 @@ function decryptPrivateKey(encryptedKey: string): string {
     return decrypted;
   } catch (error) {
     console.error('❌ Failed to decrypt private key:', error);
-    throw new Error('Decryption failed - verify WALLET_ENCRYPTION_KEY is correct');
+    throw new Error('Decryption failed');
   }
 }
 
 /**
- * Try to get gas sponsorship from Pimlico
- * Returns null if Pimlico is not configured or unavailable
+ * Request gas sponsorship from Alchemy
  */
-async function tryPimlicoSponsorship(
-  userAddress: string,
+async function requestAlchemySponsorship(
+  userAddress: Address,
+  txData: Hex,
   network: NetworkType
-): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | null> {
-  if (!PIMLICO_API_KEY) {
-    console.log('⚠️  PIMLICO_API_KEY not set - skipping gas sponsorship');
-    return null;
+): Promise<{
+  sponsored: boolean;
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+}> {
+  if (!ALCHEMY_API_KEY || !ALCHEMY_GAS_POLICY_ID) {
+    console.log('⚠️  Alchemy not configured - skipping gas sponsorship');
+    return { sponsored: false };
   }
 
   try {
-    console.log(`\n⛽ Requesting gas sponsorship from Pimlico...`);
-    
-    const pimlicoUrl = getPimlicoUrl(network);
-    
-    // Get current gas price from Pimlico
-    const gasPriceRequest = {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'eth_gasPrice',
-      params: []
-    };
+    console.log(`\n⛽ Requesting gas sponsorship from Alchemy...`);
+    console.log(`   Policy ID: ${ALCHEMY_GAS_POLICY_ID.substring(0, 8)}...`);
 
-    const response = await fetch(pimlicoUrl, {
+    const rpcUrl = getRpcUrl(network);
+
+    // Request sponsorship from Alchemy
+    const response = await fetch(rpcUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(gasPriceRequest)
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ALCHEMY_API_KEY}`
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'alchemy_requestGasAndPaymasterAndData',
+        params: [{
+          policyId: ALCHEMY_GAS_POLICY_ID,
+          entryPoint: '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789',
+          userOp: {
+            sender: userAddress,
+            callData: txData,
+          }
+        }]
+      })
     });
 
-    if (!response.ok) {
-      console.log(`⚠️  Pimlico responded with ${response.status} - falling back to user-paid gas`);
-      return null;
-    }
-
-    const data = await response.json() as { 
-      result?: string; 
-      error?: { message: string } 
+    const data = await response.json() as {
+      result?: {
+        maxFeePerGas?: string;
+        maxPriorityFeePerGas?: string;
+        paymasterAndData?: string;
+      };
+      error?: { message: string };
     };
-    
+
     if (data.error) {
-      console.log(`⚠️  Pimlico error: ${data.error.message} - falling back to user-paid gas`);
-      return null;
+      console.log(`⚠️  Alchemy sponsorship unavailable: ${data.error.message}`);
+      return { sponsored: false };
     }
 
-    // If we get here, Pimlico is working
-    console.log('✅ Pimlico available - gas will be sponsored!');
-    
-    // Return gas parameters (Pimlico handles sponsorship automatically when using their RPC)
-    const gasPrice = BigInt(data.result || '0');
-    
-    return {
-      maxFeePerGas: gasPrice * BigInt(120) / BigInt(100), // 20% buffer
-      maxPriorityFeePerGas: gasPrice / BigInt(2)
-    };
+    if (data.result?.maxFeePerGas) {
+      console.log(`✅ Gas sponsorship approved by Alchemy!`);
+      return {
+        sponsored: true,
+        maxFeePerGas: BigInt(data.result.maxFeePerGas),
+        maxPriorityFeePerGas: BigInt(data.result.maxPriorityFeePerGas || 0)
+      };
+    }
+
+    return { sponsored: false };
+
   } catch (error: any) {
-    console.log(`⚠️  Pimlico request failed: ${error.message} - falling back to user-paid gas`);
-    return null;
+    console.log(`⚠️  Alchemy request failed: ${error.message}`);
+    return { sponsored: false };
   }
 }
 
 /**
- * Send USDC with optional Pimlico gas sponsorship
- * 
- * @param encryptedUserPrivateKey - User's encrypted private key from database
- * @param toAddress - Recipient address
- * @param amountUSDC - Amount in USDC (decimal, e.g., "10.50")
- * @param network - Network to use (base-mainnet or base-sepolia)
- * @returns Transaction result with hash and explorer URL
+ * Send USDC with optional Alchemy gas sponsorship
+ * Falls back to user-paid gas if sponsorship unavailable
  */
 export async function sendUSDCWithPaymaster(
   encryptedUserPrivateKey: string,
@@ -173,7 +178,7 @@ export async function sendUSDCWithPaymaster(
   userAddress: string;
 }> {
   try {
-    // ============= INPUT VALIDATION =============
+    // ============= VALIDATION =============
     if (!encryptedUserPrivateKey || encryptedUserPrivateKey.trim() === '') {
       throw new Error('Encrypted private key is required');
     }
@@ -187,124 +192,127 @@ export async function sendUSDCWithPaymaster(
       throw new Error('Invalid amount');
     }
 
-    const hasPimlico = !!PIMLICO_API_KEY;
+    const hasAlchemy = !!(ALCHEMY_API_KEY && ALCHEMY_GAS_POLICY_ID);
 
     console.log(`\n${'═'.repeat(70)}`);
-    console.log(`💳 USDC TRANSFER ${hasPimlico ? '(Attempting Gas Sponsorship)' : '(User Pays Gas)'}`);
+    console.log(`💳 USDC TRANSFER ${hasAlchemy ? '(Alchemy Gas Sponsorship)' : '(User Pays Gas)'}`);
     console.log(`${'═'.repeat(70)}`);
     console.log(`Amount: ${amountUSDC} USDC`);
     console.log(`To: ${toAddress}`);
     console.log(`Network: ${network}`);
 
-    // ============= STEP 1: SETUP =============
+    // ============= SETUP =============
     console.log(`\n📋 STEP 1: Setting up...`);
-    const chain = getChain(network);
     const rpcUrl = getRpcUrl(network);
 
-    // ============= STEP 2: DECRYPT USER'S KEY =============
+    // ============= DECRYPT KEY =============
     console.log(`\n🔐 STEP 2: Decrypting user's private key...`);
     const userPrivateKey = decryptPrivateKey(encryptedUserPrivateKey);
     const account = privateKeyToAccount(userPrivateKey as `0x${string}`);
     const userAddress = account.address;
     console.log(`   User Address: ${userAddress}`);
 
-    // ============= STEP 3: CREATE VIEM CLIENTS =============
-    console.log(`\n🔧 STEP 3: Creating viem clients...`);
+    // ============= CREATE CLIENTS =============
+    console.log(`\n🔧 STEP 3: Creating blockchain clients...`);
     const publicClient = createPublicClient({
-      chain,
+      chain: base,
       transport: http(rpcUrl)
     });
 
     const walletClient = createWalletClient({
       account,
-      chain,
+      chain: base,
       transport: http(rpcUrl)
     });
     console.log(`   ✅ Clients ready`);
 
-    // ============= STEP 4: CHECK BALANCES =============
-    console.log(`\n💰 STEP 4: Checking balances...`);
+    // ============= CHECK BALANCE =============
+    console.log(`\n💰 STEP 4: Checking USDC balance...`);
     const amountInWei = parseUnits(amountUSDC, 6);
 
-    // Check USDC balance
-    const usdcBalance = await publicClient.readContract({
-      address: USDC_ADDRESS as `0x${string}`,
+    const balance = await publicClient.readContract({
+      address: USDC_ADDRESS as Address,
       abi: USDC_ABI,
       functionName: 'balanceOf',
-      args: [userAddress]
+      args: [userAddress as Address]
     });
 
-    const balanceInUSDC = parseFloat((usdcBalance / BigInt(10 ** 6)).toString());
-    console.log(`   USDC Balance: ${balanceInUSDC} USDC`);
+    const balanceInUSDC = parseFloat((balance / BigInt(10 ** 6)).toString());
+    console.log(`   Balance: ${balanceInUSDC} USDC`);
 
-    if (usdcBalance < amountInWei) {
-      throw new Error(`Insufficient USDC balance. Have: ${balanceInUSDC}, Need: ${amountUSDC}`);
+    if (balance < amountInWei) {
+      throw new Error(`Insufficient USDC. Have: ${balanceInUSDC}, Need: ${amountUSDC}`);
+    }
+    console.log(`   ✅ Balance check passed`);
+
+    // Check ETH if no sponsorship
+    if (!hasAlchemy) {
+      const ethBalance = await publicClient.getBalance({ address: userAddress as Address });
+      const ethFormatted = (Number(ethBalance) / 1e18).toFixed(6);
+      console.log(`   ETH Balance: ${ethFormatted} ETH`);
+      
+      if (ethBalance < BigInt(10000000000000)) {
+        throw new Error(`Insufficient ETH for gas. Have: ${ethFormatted} ETH`);
+      }
     }
 
-    // Check ETH balance (needed if no gas sponsorship)
-    const ethBalance = await publicClient.getBalance({ address: userAddress as `0x${string}` });
-    const ethFormatted = (Number(ethBalance) / 1e18).toFixed(6);
-    console.log(`   ETH Balance: ${ethFormatted} ETH`);
-
-    if (!hasPimlico && ethBalance < BigInt(10000000000000)) { // ~0.00001 ETH minimum
-      throw new Error(`Insufficient ETH for gas fees. Have: ${ethFormatted} ETH. Please add some ETH.`);
-    }
-
-    console.log(`   ✅ Balance checks passed`);
-
-    // ============= STEP 5: PREPARE TRANSACTION =============
+    // ============= PREPARE TRANSACTION =============
     console.log(`\n📝 STEP 5: Preparing transaction...`);
     const txData = encodeFunctionData({
       abi: USDC_ABI,
       functionName: 'transfer',
-      args: [toAddress as `0x${string}`, amountInWei]
+      args: [toAddress as Address, amountInWei]
     });
     console.log(`   ✅ Transaction data encoded`);
 
-    // ============= STEP 6: TRY PIMLICO SPONSORSHIP =============
+    // ============= TRY ALCHEMY SPONSORSHIP =============
     let gasSponsored = false;
     let gasParams: any = {};
 
-    if (hasPimlico) {
-      const sponsorship = await tryPimlicoSponsorship(userAddress, network);
+    if (hasAlchemy) {
+      console.log(`\n⛽ STEP 6: Requesting Alchemy gas sponsorship...`);
+      const sponsorship = await requestAlchemySponsorship(
+        userAddress as Address,
+        txData,
+        network
+      );
       
-      if (sponsorship) {
+      if (sponsorship.sponsored && sponsorship.maxFeePerGas) {
         gasParams = {
           maxFeePerGas: sponsorship.maxFeePerGas,
           maxPriorityFeePerGas: sponsorship.maxPriorityFeePerGas
         };
         gasSponsored = true;
-        console.log(`   ✅ Gas will be sponsored by Pimlico!`);
+        console.log(`   ✅ Gas will be sponsored by Alchemy!`);
       } else {
-        console.log(`   ⚠️  Gas sponsorship unavailable - user will pay gas`);
+        console.log(`   ⚠️  Sponsorship unavailable - user will pay gas`);
       }
     }
 
-    // ============= STEP 7: SEND TRANSACTION =============
-    console.log(`\n✍️  STEP ${hasPimlico ? 7 : 6}: Signing and sending transaction...`);
+    // ============= SEND TRANSACTION =============
+    const stepNum = hasAlchemy ? 7 : 6;
+    console.log(`\n✍️  STEP ${stepNum}: Sending transaction...`);
     
     const txHash = await walletClient.sendTransaction({
-      to: USDC_ADDRESS as `0x${string}`,
-      data: txData as `0x${string}`,
+      to: USDC_ADDRESS as Address,
+      data: txData as Hex,
       ...gasParams
     });
     
     console.log(`   ✅ Transaction sent!`);
     console.log(`   Hash: ${txHash}`);
 
-    // ============= STEP 8: WAIT FOR CONFIRMATION =============
-    console.log(`\n⏳ STEP ${hasPimlico ? 8 : 7}: Waiting for confirmation...`);
+    // ============= WAIT FOR CONFIRMATION =============
+    console.log(`\n⏳ STEP ${stepNum + 1}: Waiting for confirmation...`);
     const receipt = await publicClient.waitForTransactionReceipt({
-      hash: txHash as `0x${string}`
+      hash: txHash as Hex
     });
     console.log(`   ✅ Confirmed!`);
     console.log(`   Block: ${receipt.blockNumber}`);
     console.log(`   Gas Used: ${receipt.gasUsed}`);
 
     // ============= GENERATE EXPLORER URL =============
-    const explorerUrl = network === 'base-mainnet'
-      ? `https://basescan.org/tx/${txHash}`
-      : `https://sepolia.basescan.org/tx/${txHash}`;
+    const explorerUrl = `https://basescan.org/tx/${txHash}`;
 
     // ============= SUCCESS =============
     console.log(`\n${'═'.repeat(70)}`);
@@ -313,7 +321,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`From: ${userAddress}`);
     console.log(`To: ${toAddress}`);
     console.log(`Amount: ${amountUSDC} USDC`);
-    console.log(`Gas: ${gasSponsored ? 'Sponsored by Pimlico ✅' : 'Paid by user'}`);
+    console.log(`Gas: ${gasSponsored ? 'Sponsored by Alchemy ✅' : 'Paid by user'}`);
     console.log(`Explorer: ${explorerUrl}`);
     console.log(`${'═'.repeat(70)}\n`);
 

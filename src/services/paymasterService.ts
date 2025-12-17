@@ -1,4 +1,4 @@
-// ============= src/services/paymasterService.ts (COMPLETE & FIXED) =============
+// ============= src/services/paymasterService.ts (FIXED) =============
 
 import { createPublicClient, createWalletClient, http, parseUnits, encodeFunctionData } from 'viem';
 import { base, baseSepolia } from 'viem/chains';
@@ -8,9 +8,18 @@ import { NetworkType } from './walletService';
 
 // ============= ENVIRONMENT VARIABLES =============
 const PAYMASTER_URL = process.env.CDP_PAYMASTER_URL || 'https://api.developer.coinbase.com/rpc/v1/base/paymaster';
-const CDP_API_KEY_ID = process.env.CDP_API_KEY_ID || '';           // ✅ From secret.json id
-const CDP_API_KEY = process.env.CDP_API_KEY || '';                 // ✅ From secret.json privateKey
+const CDP_API_KEY_ID = process.env.CDP_API_KEY_ID || '';           // ✅ Your CDP Key ID
+const CDP_API_KEY_SECRET = process.env.CDP_API_KEY_SECRET || '';   // ✅ Your CDP Secret Key (FIXED!)
 const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || '';
+
+// Validate required environment variables
+if (!CDP_API_KEY_ID || !CDP_API_KEY_SECRET) {
+  console.warn('⚠️ WARNING: CDP_API_KEY_ID and CDP_API_KEY_SECRET not configured');
+}
+
+if (!WALLET_ENCRYPTION_KEY) {
+  console.warn('⚠️ WARNING: WALLET_ENCRYPTION_KEY not configured');
+}
 
 // ============= USDC CONTRACT =============
 const USDC_ABI = [
@@ -55,43 +64,26 @@ interface PaymasterResponse {
 
 // ============= UTILITY FUNCTIONS =============
 
-/**
- * Get the chain object based on network type
- */
 function getChain(network: NetworkType) {
   return network === 'base-mainnet' ? base : baseSepolia;
 }
 
-/**
- * Get the RPC URL based on network type
- */
 function getRpcUrl(network: NetworkType): string {
   return network === 'base-mainnet'
     ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
     : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 }
 
-/**
- * Decrypt user's private key from database
- * This is different from CDP_API_KEY!
- * 
- * @param encryptedKey - Encrypted private key stored in database
- * @returns Decrypted private key (plaintext, for signing only)
- */
 function decryptPrivateKey(encryptedKey: string): string {
   if (!WALLET_ENCRYPTION_KEY) {
     throw new Error('WALLET_ENCRYPTION_KEY environment variable not set');
   }
 
   try {
-    // Encrypted key is base64 encoded
     const encrypted = Buffer.from(encryptedKey, 'base64');
-    
-    // First 16 bytes = IV, rest = encrypted data
     const iv = encrypted.slice(0, 16);
     const encryptedData = encrypted.slice(16);
     
-    // Decrypt using AES-256-CBC
     const decipher = crypto.createDecipheriv(
       'aes-256-cbc',
       Buffer.from(WALLET_ENCRYPTION_KEY, 'base64'),
@@ -109,9 +101,6 @@ function decryptPrivateKey(encryptedKey: string): string {
   }
 }
 
-/**
- * Convert hex string to bigint safely
- */
 function hexToBigInt(hex: string | undefined): bigint | undefined {
   if (!hex) return undefined;
   try {
@@ -122,14 +111,6 @@ function hexToBigInt(hex: string | undefined): bigint | undefined {
   }
 }
 
-/**
- * Request gas sponsorship from CDP Paymaster
- * Uses YOUR CDP credentials (not user's key!)
- * 
- * @param userAddress - The user's wallet address
- * @param transactionData - Encoded transaction data
- * @returns Gas parameters from CDP
- */
 async function getPaymasterSponsorship(
   userAddress: string,
   transactionData: `0x${string}`
@@ -140,9 +121,9 @@ async function getPaymasterSponsorship(
   verificationGasLimit: bigint;
   preVerificationGas: bigint;
 }> {
-  // Validate CDP credentials are configured
-  if (!CDP_API_KEY_ID || !CDP_API_KEY) {
-    throw new Error('CDP_API_KEY_ID and CDP_API_KEY not configured in .env');
+  // Validate CDP credentials
+  if (!CDP_API_KEY_ID || !CDP_API_KEY_SECRET) {
+    throw new Error('CDP_API_KEY_ID and CDP_API_KEY_SECRET not configured in .env');
   }
 
   console.log(`\n🔧 Requesting gas sponsorship from CDP Paymaster...`);
@@ -155,10 +136,10 @@ async function getPaymasterSponsorship(
       method: 'pm_getPaymasterData',
       params: [
         {
-          from: userAddress,              // Who is sending
-          to: USDC_ADDRESS,               // Target contract
-          data: transactionData,          // Encoded transfer call
-          value: '0x0'                    // No ETH being sent
+          from: userAddress,
+          to: USDC_ADDRESS,
+          data: transactionData,
+          value: '0x0'
         }
       ]
     };
@@ -167,15 +148,14 @@ async function getPaymasterSponsorship(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${CDP_API_KEY}`,    // ✅ Your secret key
-        'X-CDP-Key-ID': CDP_API_KEY_ID               // ✅ Your API key ID
+        'Authorization': `Bearer ${CDP_API_KEY_SECRET}`,    // ✅ FIXED: Using CDP_API_KEY_SECRET
+        'X-CDP-Key-ID': CDP_API_KEY_ID
       },
       body: JSON.stringify(paymasterRequest)
     });
 
     const paymasterData = (await response.json()) as PaymasterResponse;
 
-    // Check for errors
     if (!response.ok || paymasterData.error || !paymasterData.result) {
       const errorMsg = paymasterData.error?.message || 'Unknown paymaster error';
       console.error(`❌ Paymaster error (${response.status}):`, errorMsg);
@@ -184,7 +164,6 @@ async function getPaymasterSponsorship(
 
     const result = paymasterData.result;
 
-    // Validate we got gas parameters
     if (!result.maxFeePerGas || !result.maxPriorityFeePerGas || !result.callGasLimit) {
       throw new Error('Paymaster response missing required gas parameters');
     }
@@ -207,22 +186,6 @@ async function getPaymasterSponsorship(
   }
 }
 
-/**
- * Send USDC with gas sponsored by CDP Paymaster
- * 
- * FLOW:
- * 1. Decrypt user's private key (from database)
- * 2. Prepare USDC transfer transaction
- * 3. Request gas sponsorship using YOUR CDP credentials
- * 4. Sign transaction with user's private key
- * 5. Send to blockchain (CDP pays gas)
- * 
- * @param encryptedUserPrivateKey - User's encrypted private key from database
- * @param toAddress - Recipient address
- * @param amountUSDC - Amount in USDC (decimal, e.g., "10.50")
- * @param network - Network to use (base-mainnet or base-sepolia)
- * @returns Transaction result with hash and explorer URL
- */
 export async function sendUSDCWithPaymaster(
   encryptedUserPrivateKey: string,
   toAddress: string,
@@ -237,7 +200,7 @@ export async function sendUSDCWithPaymaster(
   userAddress: string;
 }> {
   try {
-    // ============= INPUT VALIDATION =============
+    // Input validation
     if (!encryptedUserPrivateKey || encryptedUserPrivateKey.trim() === '') {
       throw new Error('Encrypted private key is required');
     }
@@ -258,19 +221,19 @@ export async function sendUSDCWithPaymaster(
     console.log(`To: ${toAddress}`);
     console.log(`Network: ${network}`);
 
-    // ============= STEP 1: SETUP =============
+    // Setup
     console.log(`\n📋 STEP 1: Setting up...`);
     const chain = getChain(network);
     const rpcUrl = getRpcUrl(network);
 
-    // ============= STEP 2: DECRYPT USER'S KEY =============
+    // Decrypt user's key
     console.log(`\n🔐 STEP 2: Decrypting user's private key...`);
     const userPrivateKey = decryptPrivateKey(encryptedUserPrivateKey);
     const account = privateKeyToAccount(userPrivateKey as `0x${string}`);
     const userAddress = account.address;
     console.log(`   User Address: ${userAddress}`);
 
-    // ============= STEP 3: CREATE VIEM CLIENTS =============
+    // Create viem clients
     console.log(`\n🔧 STEP 3: Creating viem clients...`);
     const publicClient = createPublicClient({
       chain,
@@ -284,7 +247,7 @@ export async function sendUSDCWithPaymaster(
     });
     console.log(`   ✅ Clients ready`);
 
-    // ============= STEP 4: CHECK BALANCE =============
+    // Check balance
     console.log(`\n💰 STEP 4: Checking USDC balance...`);
     const amountInWei = parseUnits(amountUSDC, 6);
 
@@ -305,7 +268,7 @@ export async function sendUSDCWithPaymaster(
     }
     console.log(`   ✅ Balance check passed`);
 
-    // ============= STEP 5: PREPARE TRANSACTION =============
+    // Prepare transaction
     console.log(`\n📝 STEP 5: Preparing transaction...`);
     const txData = encodeFunctionData({
       abi: USDC_ABI,
@@ -314,15 +277,15 @@ export async function sendUSDCWithPaymaster(
     });
     console.log(`   ✅ Transaction data encoded`);
 
-    // ============= STEP 6: REQUEST GAS SPONSORSHIP =============
+    // Request gas sponsorship
     console.log(`\n⛽ STEP 6: Requesting gas sponsorship from CDP...`);
     console.log(`   Using CDP credentials:`);
     console.log(`   - API Key ID: ${CDP_API_KEY_ID.substring(0, 20)}...`);
-    console.log(`   - API Key: ${CDP_API_KEY.substring(0, 20)}...`);
+    console.log(`   - API Key Secret: ${CDP_API_KEY_SECRET.substring(0, 20)}...`);
 
     const gasParams = await getPaymasterSponsorship(userAddress, txData);
 
-    // ============= STEP 7: SIGN & SEND TRANSACTION =============
+    // Sign & send transaction
     console.log(`\n✍️  STEP 7: Signing transaction with user's key...`);
     const txHash = await walletClient.sendTransaction({
       to: USDC_ADDRESS as `0x${string}`,
@@ -334,7 +297,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   ✅ Transaction sent!`);
     console.log(`   Hash: ${txHash}`);
 
-    // ============= STEP 8: WAIT FOR CONFIRMATION =============
+    // Wait for confirmation
     console.log(`\n⏳ STEP 8: Waiting for confirmation...`);
     const receipt = await publicClient.waitForTransactionReceipt({
       hash: txHash as `0x${string}`
@@ -343,12 +306,12 @@ export async function sendUSDCWithPaymaster(
     console.log(`   Block: ${receipt.blockNumber}`);
     console.log(`   Gas Used: ${receipt.gasUsed}`);
 
-    // ============= GENERATE EXPLORER URL =============
+    // Generate explorer URL
     const explorerUrl = network === 'base-mainnet'
       ? `https://basescan.org/tx/${txHash}`
       : `https://sepolia.basescan.org/tx/${txHash}`;
 
-    // ============= SUCCESS =============
+    // Success
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ TRANSFER SUCCESSFUL!`);
     console.log(`${'═'.repeat(60)}`);
@@ -378,7 +341,6 @@ export async function sendUSDCWithPaymaster(
   }
 }
 
-// ============= EXPORT =============
 export default {
   sendUSDCWithPaymaster
 };

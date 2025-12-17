@@ -1,42 +1,40 @@
-// ============= src/services/walletService.ts (UPDATED) =============
-import { CdpClient } from '@coinbase/cdp-sdk';
-import { parseEther, formatEther, encodeFunctionData, createPublicClient, http } from 'viem';
+// ============= src/services/walletService.ts (COMPLETE & FIXED) =============
+import { createPublicClient, createWalletClient, http, parseEther, encodeFunctionData } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
 import crypto from 'crypto';
 
 /**
- * Encryption utilities for wallet data
+ * ============= CONFIGURATION =============
  */
-const ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
-
-const encrypt = (text: string): string => {
-  const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  return iv.toString('hex') + ':' + encrypted;
-};
-
-const decrypt = (encryptedText: string): string => {
-  const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-  const parts = encryptedText.split(':');
-  const iv = Buffer.from(parts[0], 'hex');
-  const encryptedData = parts[1];
-  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-  let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
-};
-
-/**
- * Supported networks - EXPORTED for use in controllers
- */
-export type NetworkType = 'base-mainnet' | 'base-sepolia' | 'ethereum-sepolia';
+export type NetworkType = 'base-mainnet' | 'base-sepolia';
 
 // USDC Contract Addresses
 const USDC_ADDRESS_MAINNET = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const USDC_ADDRESS_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+
+// Validate encryption key on startup
+const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY;
+
+if (!WALLET_ENCRYPTION_KEY) {
+  console.error('❌ CRITICAL: WALLET_ENCRYPTION_KEY must be set in .env!');
+  throw new Error('WALLET_ENCRYPTION_KEY environment variable is required');
+}
+
+// Type assertion since we've validated it exists
+const ENCRYPTION_KEY: string = WALLET_ENCRYPTION_KEY;
+
+// Test encryption key is valid base64 and 32 bytes
+try {
+  const keyBuffer = Buffer.from(ENCRYPTION_KEY, 'base64');
+  if (keyBuffer.length !== 32) {
+    throw new Error(`Key must be 32 bytes, got ${keyBuffer.length}`);
+  }
+  console.log('✅ Wallet encryption key validated (32 bytes)');
+} catch (error: any) {
+  console.error('❌ Invalid WALLET_ENCRYPTION_KEY:', error.message);
+  throw new Error('WALLET_ENCRYPTION_KEY must be a valid base64-encoded 32-byte key');
+}
 
 // ERC20 ABI for balance checking
 const ERC20_ABI = [
@@ -47,99 +45,158 @@ const ERC20_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" }
+    ],
+    name: "transfer",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  }
 ] as const;
 
 /**
- * Initialize CDP Client (no credentials needed)
+ * ============= ENCRYPTION UTILITIES =============
  */
-const initializeCDP = (): CdpClient | null => {
-  try {
-    const cdp = new CdpClient();
-    console.log('✅ CDP Client initialized successfully');
-    return cdp;
-  } catch (error: any) {
-    console.error('❌ Error initializing CDP Client:', error.message);
-    return null;
-  }
-};
 
 /**
- * Create server-managed smart wallet using CDP SDK
- * Following the pattern from working examples
+ * Encrypt private key using AES-256-CBC
+ * Format: BASE64(IV + ENCRYPTED_DATA)
+ * This matches the format expected by paymasterService.ts
+ */
+function encryptPrivateKey(privateKey: string): string {
+  try {
+    const key = Buffer.from(ENCRYPTION_KEY, 'base64');
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+    
+    let encrypted = cipher.update(privateKey, 'utf8');
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    
+    // Combine IV + encrypted data and return as base64
+    const combined = Buffer.concat([iv, encrypted]);
+    return combined.toString('base64');
+  } catch (error: any) {
+    throw new Error(`Encryption failed: ${error.message}`);
+  }
+}
+
+/**
+ * Decrypt private key (for internal use)
+ * Format: BASE64(IV + ENCRYPTED_DATA)
+ */
+function decryptPrivateKey(encryptedKey: string): string {
+  try {
+    const key = Buffer.from(ENCRYPTION_KEY, 'base64');
+    const encrypted = Buffer.from(encryptedKey, 'base64');
+    
+    const iv = encrypted.slice(0, 16);
+    const encryptedData = encrypted.slice(16);
+    
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    let decrypted = decipher.update(encryptedData, undefined, 'utf8');
+    decrypted += decipher.final('utf8');
+    
+    return decrypted;
+  } catch (error: any) {
+    throw new Error(`Decryption failed: ${error.message}`);
+  }
+}
+
+/**
+ * Test encryption/decryption on startup
+ */
+function testEncryption(): void {
+  try {
+    const testKey = '0x' + '1'.repeat(64);
+    const encrypted = encryptPrivateKey(testKey);
+    const decrypted = decryptPrivateKey(encrypted);
+    
+    if (testKey !== decrypted) {
+      throw new Error('Decrypted value does not match original');
+    }
+    
+    console.log('✅ Encryption test passed');
+  } catch (error: any) {
+    console.error('❌ Encryption test FAILED:', error.message);
+    throw new Error('Encryption system is broken! Cannot proceed.');
+  }
+}
+
+// Run encryption test on module load
+testEncryption();
+
+/**
+ * ============= WALLET CREATION =============
+ */
+
+/**
+ * Create server-managed wallet with encrypted private key storage
+ * 
+ * IMPORTANT: This stores the PRIVATE KEY (encrypted), not just addresses
+ * This allows the server to sign transactions on behalf of users
+ * 
+ * @returns Wallet object with encrypted private key
  */
 export const createServerWallet = async () => {
-  const cdp = initializeCDP();
-
-  if (!cdp) {
-    console.log('📝 CDP not available - creating mock wallet');
-    return createMockWallet();
-  }
-
   try {
-    console.log('🔐 Creating CDP smart wallet on Base...');
+    console.log('\n' + '='.repeat(70));
+    console.log('🔐 Creating New Wallet with Encrypted Private Key Storage');
+    console.log('='.repeat(70));
 
-    // Step 1: Create owner account
-    const owner = await cdp.evm.createAccount({});
-    console.log('✅ Owner account created:', owner.address);
+    // Step 1: Generate a secure random private key
+    const privateKey = '0x' + crypto.randomBytes(32).toString('hex');
+    console.log('✅ Step 1: Private key generated (32 random bytes)');
 
-    // Step 2: Create smart account
-    const smartAccount = await cdp.evm.createSmartAccount({
-      owner,
-    });
-    console.log('✅ Smart account created:', smartAccount.address);
+    // Step 2: Derive Ethereum address from private key
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
+    console.log('✅ Step 2: Address derived:', account.address);
 
-    // Step 3: Store wallet data (encrypted)
-    const walletData = {
-      ownerAddress: owner.address,
-      smartAccountAddress: smartAccount.address,
-    };
+    // Step 3: Encrypt the private key before storing
+    const encryptedWalletData = encryptPrivateKey(privateKey);
+    console.log('✅ Step 3: Private key encrypted (BASE64 format)');
+    console.log('   Encrypted length:', encryptedWalletData.length, 'chars');
 
-    const encryptedWalletData = encrypt(JSON.stringify(walletData));
-
-    console.log('✅ CDP wallet created successfully');
-
-    return {
-      ownerAddress: owner.address,
-      smartAccountAddress: smartAccount.address,
+    // Step 4: Return wallet object
+    const wallet = {
+      ownerAddress: account.address,
+      smartAccountAddress: account.address,
       network: 'base-mainnet' as NetworkType,
-      walletId: smartAccount.address,
+      walletId: null,
       encryptedSeed: null,
-      encryptedWalletData,
+      encryptedWalletData,  // ← ENCRYPTED PRIVATE KEY
       isReal: true
     };
+
+    console.log('='.repeat(70));
+    console.log('✅ Wallet Created Successfully');
+    console.log('   Address:', account.address);
+    console.log('   Network: base-mainnet');
+    console.log('   Private Key: ENCRYPTED ✅');
+    console.log('   Can sign transactions: YES ✅');
+    console.log('='.repeat(70) + '\n');
+
+    return wallet;
   } catch (error: any) {
-    console.error('❌ Error creating CDP wallet:', error.message);
-    console.error('   Full error:', error);
-    console.log('📝 Falling back to mock wallet');
-    return createMockWallet();
+    console.error('❌ Wallet creation failed:', error.message);
+    throw new Error(`Failed to create wallet: ${error.message}`);
   }
 };
 
 /**
- * Mock wallet fallback
+ * ============= BALANCE FUNCTIONS =============
  */
-const createMockWallet = () => {
-  const address = `0x${crypto.randomBytes(20).toString('hex')}`;
-  
-  return {
-    ownerAddress: address,
-    smartAccountAddress: address,
-    network: 'base-mainnet' as NetworkType,
-    walletId: null,
-    encryptedSeed: null,
-    encryptedWalletData: null,
-    isReal: false
-  };
-};
 
 /**
- * Get ETH balance using viem
+ * Get ETH balance for an address
  */
 export const getWalletBalance = async (
-  smartAccountAddress: string | null,
+  address: string | null,
   network: NetworkType = 'base-mainnet'
 ) => {
-  if (!smartAccountAddress) {
+  if (!address) {
     return {
       balance: '0.000000',
       balanceInWei: '0',
@@ -150,19 +207,18 @@ export const getWalletBalance = async (
 
   try {
     const chain = network === 'base-mainnet' ? base : baseSepolia;
-
     const publicClient = createPublicClient({
       chain,
-      transport: http(),
+      transport: http()
     });
 
     const balance = await publicClient.getBalance({
-      address: smartAccountAddress as `0x${string}`,
+      address: address as `0x${string}`,
     });
 
     const balanceInEth = (Number(balance) / 1e18).toFixed(6);
 
-    console.log(`📊 ETH Balance for ${smartAccountAddress}: ${balanceInEth} ETH`);
+    console.log(`💰 ETH Balance for ${address}: ${balanceInEth} ETH`);
 
     return {
       balance: balanceInEth,
@@ -182,7 +238,7 @@ export const getWalletBalance = async (
 };
 
 /**
- * Get USDC balance using viem
+ * Get USDC balance for an address
  */
 export const getUSDCBalance = async (
   address: string | null,
@@ -203,7 +259,7 @@ export const getUSDCBalance = async (
 
     const publicClient = createPublicClient({
       chain,
-      transport: http(),
+      transport: http()
     });
 
     const balance = await publicClient.readContract({
@@ -216,7 +272,7 @@ export const getUSDCBalance = async (
     // USDC has 6 decimals
     const balanceInUsdc = (Number(balance) / 1e6).toFixed(2);
 
-    console.log(`📊 USDC Balance for ${address}: ${balanceInUsdc} USDC`);
+    console.log(`💵 USDC Balance for ${address}: ${balanceInUsdc} USDC`);
 
     return {
       balance: balanceInUsdc,
@@ -236,7 +292,12 @@ export const getUSDCBalance = async (
 };
 
 /**
- * Send ETH transaction using CDP smart account
+ * ============= TRANSACTION FUNCTIONS =============
+ */
+
+/**
+ * Send ETH transaction
+ * Note: For USDC transfers, use paymasterService.sendUSDCWithPaymaster instead
  */
 export const sendTransaction = async (
   userId: string,
@@ -245,80 +306,72 @@ export const sendTransaction = async (
   amount: string,
   network: NetworkType = 'base-mainnet'
 ) => {
-  const cdp = initializeCDP();
-
-  if (!cdp || !encryptedWalletData) {
-    throw new Error('CDP not configured or wallet data not found');
-  }
-
   try {
-    console.log(`💸 Sending ${amount} ETH to ${toAddress}`);
+    console.log(`\n💸 Sending ${amount} ETH to ${toAddress}`);
 
-    const walletData = JSON.parse(decrypt(encryptedWalletData));
+    // Decrypt private key
+    const privateKey = decryptPrivateKey(encryptedWalletData);
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
 
-    const owner = await cdp.evm.createAccount({});
-    const smartAccount = await cdp.evm.createSmartAccount({
-      owner,
-    });
-
-    console.log(`   From: ${smartAccount.address}`);
+    console.log(`   From: ${account.address}`);
     console.log(`   To: ${toAddress}`);
-    console.log(`   Amount: ${amount} ETH`);
     console.log(`   Network: ${network}`);
 
-    const result = await cdp.evm.sendUserOperation({
-      smartAccount,
-      network: network as any,
-      calls: [
-        {
-          to: toAddress as `0x${string}`,
-          value: parseEther(amount),
-          data: '0x' as `0x${string}`,
-        },
-      ],
+    // Setup clients
+    const chain = network === 'base-mainnet' ? base : baseSepolia;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
+
+    const walletClient = createWalletClient({
+      account,
+      chain,
+      transport: http(rpcUrl)
     });
 
-    console.log('📝 UserOp Hash:', result.userOpHash);
-    console.log('   Waiting for confirmation...');
-
-    const userOperation = await cdp.evm.waitForUserOperation({
-      smartAccountAddress: smartAccount.address,
-      userOpHash: result.userOpHash,
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(rpcUrl)
     });
 
-    if (userOperation.status !== 'complete') {
-      throw new Error(`Transaction failed: ${userOperation.status}`);
-    }
+    // Send transaction
+    const txHash = await walletClient.sendTransaction({
+      to: toAddress as `0x${string}`,
+      value: parseEther(amount),
+    });
 
-    console.log('✅ Transaction confirmed!');
-    console.log('   TX Hash:', userOperation.transactionHash);
+    console.log(`   Transaction sent: ${txHash}`);
+    console.log(`   Waiting for confirmation...`);
 
-    let explorerUrl = '';
-    if (network === 'base-mainnet') {
-      explorerUrl = `https://basescan.org/tx/${userOperation.transactionHash}`;
-    } else if (network === 'base-sepolia') {
-      explorerUrl = `https://sepolia.basescan.org/tx/${userOperation.transactionHash}`;
-    } else if (network === 'ethereum-sepolia') {
-      explorerUrl = `https://sepolia.etherscan.io/tx/${userOperation.transactionHash}`;
-    }
+    // Wait for confirmation
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash
+    });
+
+    console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
+
+    const explorerUrl = network === 'base-mainnet'
+      ? `https://basescan.org/tx/${txHash}`
+      : `https://sepolia.basescan.org/tx/${txHash}`;
 
     return {
       success: true,
-      transactionHash: userOperation.transactionHash,
+      transactionHash: txHash,
       amount,
       to: toAddress,
-      from: smartAccount.address,
-      status: userOperation.status,
+      from: account.address,
+      status: 'complete',
       explorerUrl
     };
   } catch (error: any) {
-    console.error('❌ Transaction failed:', error.message);
-    throw new Error(`Transaction failed: ${error.message}`);
+    console.error('❌ ETH transfer failed:', error.message);
+    throw new Error(`ETH transfer failed: ${error.message}`);
   }
 };
 
 /**
- * Send ERC20 token transfer
+ * Send ERC20 token (including USDC)
+ * Note: For gas-sponsored USDC transfers, use paymasterService.sendUSDCWithPaymaster
  */
 export const sendToken = async (
   userId: string,
@@ -329,76 +382,66 @@ export const sendToken = async (
   decimals: number = 6,
   network: NetworkType = 'base-mainnet'
 ) => {
-  const cdp = initializeCDP();
-
-  if (!cdp || !encryptedWalletData) {
-    throw new Error('CDP not configured or wallet data not found');
-  }
-
   try {
-    console.log(`💸 Sending ${amount} tokens to ${toAddress}`);
+    console.log(`\n💸 Sending ${amount} tokens to ${toAddress}`);
     console.log(`   Token: ${tokenAddress}`);
-    console.log(`   Network: ${network}`);
 
-    const walletData = JSON.parse(decrypt(encryptedWalletData));
+    // Decrypt private key
+    const privateKey = decryptPrivateKey(encryptedWalletData);
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
 
-    const owner = await cdp.evm.createAccount({});
-    const smartAccount = await cdp.evm.createSmartAccount({ owner });
+    // Setup clients
+    const chain = network === 'base-mainnet' ? base : baseSepolia;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 
-    const ERC20_TRANSFER_ABI = [
-      {
-        inputs: [
-          { name: "recipient", type: "address" },
-          { name: "amount", type: "uint256" },
-        ],
-        name: "transfer",
-        outputs: [{ name: "", type: "bool" }],
-        stateMutability: "nonpayable",
-        type: "function",
-      },
-    ] as const;
+    const walletClient = createWalletClient({
+      account,
+      chain,
+      transport: http(rpcUrl)
+    });
 
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(rpcUrl)
+    });
+
+    // Encode transfer function
     const transferData = encodeFunctionData({
-      abi: ERC20_TRANSFER_ABI,
-      functionName: "transfer",
-      args: [toAddress as `0x${string}`, BigInt(amount)],
+      abi: ERC20_ABI,
+      functionName: 'transfer',
+      args: [toAddress as `0x${string}`, BigInt(amount)]
     });
 
-    const result = await cdp.evm.sendUserOperation({
-      smartAccount,
-      network: network as any,
-      calls: [
-        {
-          to: tokenAddress as `0x${string}`,
-          value: 0n,
-          data: transferData,
-        },
-      ],
+    // Send transaction
+    const txHash = await walletClient.sendTransaction({
+      to: tokenAddress as `0x${string}`,
+      data: transferData,
     });
 
-    console.log('📝 UserOp Hash:', result.userOpHash);
-    console.log('   Waiting for confirmation...');
+    console.log(`   Transaction sent: ${txHash}`);
 
-    const userOperation = await cdp.evm.waitForUserOperation({
-      smartAccountAddress: smartAccount.address,
-      userOpHash: result.userOpHash,
+    // Wait for confirmation
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash
     });
 
-    if (userOperation.status !== 'complete') {
-      throw new Error(`Transaction failed: ${userOperation.status}`);
-    }
+    console.log(`✅ Token transfer confirmed`);
 
-    console.log('✅ Token transfer successful!');
-    console.log('   TX Hash:', userOperation.transactionHash);
+    const explorerUrl = network === 'base-mainnet'
+      ? `https://basescan.org/tx/${txHash}`
+      : `https://sepolia.basescan.org/tx/${txHash}`;
 
     return {
       success: true,
-      transactionHash: userOperation.transactionHash,
+      transactionHash: txHash,
       amount,
       to: toAddress,
-      from: smartAccount.address,
+      from: account.address,
       tokenAddress,
-      status: userOperation.status
+      status: 'complete',
+      explorerUrl
     };
   } catch (error: any) {
     console.error('❌ Token transfer failed:', error.message);
@@ -415,47 +458,43 @@ export const executeBatchTransaction = async (
   calls: Array<{ to: string; value: bigint; data: string }>,
   network: NetworkType = 'base-mainnet'
 ) => {
-  const cdp = initializeCDP();
-
-  if (!cdp || !encryptedWalletData) {
-    throw new Error('CDP not configured or wallet data not found');
-  }
-
   try {
-    console.log(`📦 Executing batch transaction with ${calls.length} calls`);
+    console.log(`\n📦 Executing batch transaction with ${calls.length} calls`);
 
-    const walletData = JSON.parse(decrypt(encryptedWalletData));
+    // Decrypt private key
+    const privateKey = decryptPrivateKey(encryptedWalletData);
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
 
-    const owner = await cdp.evm.createAccount({});
-    const smartAccount = await cdp.evm.createSmartAccount({ owner });
+    // Setup clients
+    const chain = network === 'base-mainnet' ? base : baseSepolia;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 
-    const result = await cdp.evm.sendUserOperation({
-      smartAccount,
-      network: network as any,
-      calls: calls.map(call => ({
+    const walletClient = createWalletClient({
+      account,
+      chain,
+      transport: http(rpcUrl)
+    });
+
+    // Execute calls sequentially (for simplicity)
+    const txHashes: string[] = [];
+
+    for (const call of calls) {
+      const txHash = await walletClient.sendTransaction({
         to: call.to as `0x${string}`,
         value: call.value,
         data: call.data as `0x${string}`,
-      })),
-    });
-
-    console.log('📝 UserOp Hash:', result.userOpHash);
-
-    const userOperation = await cdp.evm.waitForUserOperation({
-      smartAccountAddress: smartAccount.address,
-      userOpHash: result.userOpHash,
-    });
-
-    if (userOperation.status !== 'complete') {
-      throw new Error(`Batch transaction failed: ${userOperation.status}`);
+      });
+      txHashes.push(txHash);
     }
 
-    console.log('✅ Batch transaction successful!');
+    console.log(`✅ Batch transaction complete`);
 
     return {
       success: true,
-      transactionHash: userOperation.transactionHash,
-      status: userOperation.status
+      transactionHash: txHashes[0], // Return first tx hash
+      status: 'complete'
     };
   } catch (error: any) {
     console.error('❌ Batch transaction failed:', error.message);
@@ -465,12 +504,16 @@ export const executeBatchTransaction = async (
 
 /**
  * Get transaction history
+ * Note: This is a placeholder - implement with block explorer API
  */
-export const getTransactionHistory = async (smartAccountAddress: string) => {
+export const getTransactionHistory = async (address: string) => {
+  // TODO: Implement using Basescan API or similar
   return [];
 };
 
-// Export everything including NetworkType
+/**
+ * ============= EXPORTS =============
+ */
 export default {
   createServerWallet,
   getWalletBalance,

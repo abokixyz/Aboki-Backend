@@ -1,30 +1,37 @@
-// ============= src/services/paymasterService.ts (ALCHEMY GAS MANAGER) =============
+// ============= src/services/paymasterService.ts (UPDATED - GASLESS WITH COINBASE PAYMASTER) =============
 
-import { createPublicClient, createWalletClient, http, parseUnits, encodeFunctionData, type Address, type Hex } from 'viem';
-import { base } from 'viem/chains';
+import { 
+  createPublicClient, 
+  createWalletClient, 
+  http, 
+  parseUnits, 
+  encodeFunctionData, 
+  type Address, 
+  type Hex 
+} from 'viem';
+import { base, baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
+import { createSmartAccountClient } from 'permissionless';
+import { toSafeSmartAccount } from 'permissionless/accounts';
+import { createPimlicoClient } from 'permissionless/clients/pimlico';
 import crypto from 'crypto';
 import { NetworkType } from './walletService';
 
 // ============= ENVIRONMENT VARIABLES =============
-const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY || '';
-const ALCHEMY_GAS_POLICY_ID = process.env.ALCHEMY_GAS_POLICY_ID || '';
 const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || '';
-
-if (!ALCHEMY_API_KEY) {
-  console.warn('⚠️ WARNING: ALCHEMY_API_KEY not configured - users will pay gas');
-}
-
-if (!ALCHEMY_GAS_POLICY_ID) {
-  console.warn('⚠️ WARNING: ALCHEMY_GAS_POLICY_ID not configured - gas sponsorship disabled');
-}
+const COINBASE_PAYMASTER_URL = process.env.COINBASE_PAYMASTER_URL || '';
 
 if (!WALLET_ENCRYPTION_KEY) {
-  throw new Error('❌ WALLET_ENCRYPTION_KEY must be set in .env');
+  throw new Error('❌ CRITICAL: WALLET_ENCRYPTION_KEY must be set in .env');
+}
+
+if (!COINBASE_PAYMASTER_URL) {
+  throw new Error('❌ CRITICAL: COINBASE_PAYMASTER_URL must be set in .env');
 }
 
 // ============= CONFIGURATION =============
 const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const ENTRYPOINT_ADDRESS_V07 = '0x0000000071727De22E5E9d8BAf0edAc6f37da032';
 
 const USDC_ABI = [
   {
@@ -49,9 +56,6 @@ const USDC_ABI = [
 // ============= UTILITY FUNCTIONS =============
 
 function getRpcUrl(network: NetworkType): string {
-  if (ALCHEMY_API_KEY) {
-    return `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-  }
   return network === 'base-mainnet'
     ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
     : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
@@ -85,84 +89,8 @@ function decryptPrivateKey(encryptedKey: string): string {
 }
 
 /**
- * Request gas sponsorship from Alchemy
- */
-async function requestAlchemySponsorship(
-  userAddress: Address,
-  txData: Hex,
-  network: NetworkType
-): Promise<{
-  sponsored: boolean;
-  maxFeePerGas?: bigint;
-  maxPriorityFeePerGas?: bigint;
-}> {
-  if (!ALCHEMY_API_KEY || !ALCHEMY_GAS_POLICY_ID) {
-    console.log('⚠️  Alchemy not configured - skipping gas sponsorship');
-    return { sponsored: false };
-  }
-
-  try {
-    console.log(`\n⛽ Requesting gas sponsorship from Alchemy...`);
-    console.log(`   Policy ID: ${ALCHEMY_GAS_POLICY_ID.substring(0, 8)}...`);
-
-    const rpcUrl = getRpcUrl(network);
-
-    // Request sponsorship from Alchemy
-    const response = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ALCHEMY_API_KEY}`
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'alchemy_requestGasAndPaymasterAndData',
-        params: [{
-          policyId: ALCHEMY_GAS_POLICY_ID,
-          entryPoint: '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789',
-          userOp: {
-            sender: userAddress,
-            callData: txData,
-          }
-        }]
-      })
-    });
-
-    const data = await response.json() as {
-      result?: {
-        maxFeePerGas?: string;
-        maxPriorityFeePerGas?: string;
-        paymasterAndData?: string;
-      };
-      error?: { message: string };
-    };
-
-    if (data.error) {
-      console.log(`⚠️  Alchemy sponsorship unavailable: ${data.error.message}`);
-      return { sponsored: false };
-    }
-
-    if (data.result?.maxFeePerGas) {
-      console.log(`✅ Gas sponsorship approved by Alchemy!`);
-      return {
-        sponsored: true,
-        maxFeePerGas: BigInt(data.result.maxFeePerGas),
-        maxPriorityFeePerGas: BigInt(data.result.maxPriorityFeePerGas || 0)
-      };
-    }
-
-    return { sponsored: false };
-
-  } catch (error: any) {
-    console.log(`⚠️  Alchemy request failed: ${error.message}`);
-    return { sponsored: false };
-  }
-}
-
-/**
- * Send USDC with optional Alchemy gas sponsorship
- * Falls back to user-paid gas if sponsorship unavailable
+ * Send USDC with Coinbase Paymaster (GASLESS)
+ * Gas fees are sponsored by Coinbase
  */
 export async function sendUSDCWithPaymaster(
   encryptedUserPrivateKey: string,
@@ -192,10 +120,8 @@ export async function sendUSDCWithPaymaster(
       throw new Error('Invalid amount');
     }
 
-    const hasAlchemy = !!(ALCHEMY_API_KEY && ALCHEMY_GAS_POLICY_ID);
-
     console.log(`\n${'═'.repeat(70)}`);
-    console.log(`💳 USDC TRANSFER ${hasAlchemy ? '(Alchemy Gas Sponsorship)' : '(User Pays Gas)'}`);
+    console.log(`💳 GASLESS USDC TRANSFER (Coinbase Paymaster)`);
     console.log(`${'═'.repeat(70)}`);
     console.log(`Amount: ${amountUSDC} USDC`);
     console.log(`To: ${toAddress}`);
@@ -204,37 +130,60 @@ export async function sendUSDCWithPaymaster(
     // ============= SETUP =============
     console.log(`\n📋 STEP 1: Setting up...`);
     const rpcUrl = getRpcUrl(network);
+    const chain = network === 'base-mainnet' ? base : baseSepolia;
 
     // ============= DECRYPT KEY =============
     console.log(`\n🔐 STEP 2: Decrypting user's private key...`);
     const userPrivateKey = decryptPrivateKey(encryptedUserPrivateKey);
-    const account = privateKeyToAccount(userPrivateKey as `0x${string}`);
-    const userAddress = account.address;
-    console.log(`   User Address: ${userAddress}`);
+    const signer = privateKeyToAccount(userPrivateKey as `0x${string}`);
+    console.log(`   EOA Signer: ${signer.address}`);
 
     // ============= CREATE CLIENTS =============
     console.log(`\n🔧 STEP 3: Creating blockchain clients...`);
     const publicClient = createPublicClient({
-      chain: base,
+      chain,
       transport: http(rpcUrl)
     });
 
-    const walletClient = createWalletClient({
-      account,
-      chain: base,
-      transport: http(rpcUrl)
+    // Create Pimlico/Paymaster client (Coinbase-compatible)
+    const pimlicoClient = createPimlicoClient({
+      transport: http(COINBASE_PAYMASTER_URL),
+      entryPoint: {
+        address: ENTRYPOINT_ADDRESS_V07,
+        version: '0.7',
+      },
     });
-    console.log(`   ✅ Clients ready`);
+    console.log(`   ✅ Paymaster client configured`);
+
+    // ============= CREATE SMART ACCOUNT =============
+    console.log(`\n🤖 STEP 4: Setting up Smart Account (Safe)...`);
+    const safeAccount = await toSafeSmartAccount({
+      client: publicClient,
+      owners: [signer],
+      threshold: BigInt(1),
+      version: '1.4.1',
+      entryPoint: {
+        address: ENTRYPOINT_ADDRESS_V07,
+        version: '0.7',
+      },
+    });
+
+    const smartAccountAddress = safeAccount.address;
+    console.log(`   Smart Account: ${smartAccountAddress}`);
+
+    if (smartAccountAddress === '0x0000000000000000000000000000000000000000') {
+      throw new Error('Smart Account failed to initialize');
+    }
 
     // ============= CHECK BALANCE =============
-    console.log(`\n💰 STEP 4: Checking USDC balance...`);
+    console.log(`\n💰 STEP 5: Checking USDC balance...`);
     const amountInWei = parseUnits(amountUSDC, 6);
 
     const balance = await publicClient.readContract({
       address: USDC_ADDRESS as Address,
       abi: USDC_ABI,
       functionName: 'balanceOf',
-      args: [userAddress as Address]
+      args: [smartAccountAddress as Address]
     });
 
     const balanceInUSDC = parseFloat((balance / BigInt(10 ** 6)).toString());
@@ -245,19 +194,18 @@ export async function sendUSDCWithPaymaster(
     }
     console.log(`   ✅ Balance check passed`);
 
-    // Check ETH if no sponsorship
-    if (!hasAlchemy) {
-      const ethBalance = await publicClient.getBalance({ address: userAddress as Address });
-      const ethFormatted = (Number(ethBalance) / 1e18).toFixed(6);
-      console.log(`   ETH Balance: ${ethFormatted} ETH`);
-      
-      if (ethBalance < BigInt(10000000000000)) {
-        throw new Error(`Insufficient ETH for gas. Have: ${ethFormatted} ETH`);
-      }
-    }
+    // ============= CREATE SMART ACCOUNT CLIENT =============
+    console.log(`\n🔗 STEP 6: Creating Smart Account Client...`);
+    const smartAccountClient = createSmartAccountClient({
+      account: safeAccount,
+      chain,
+      bundlerTransport: http(COINBASE_PAYMASTER_URL),
+      paymaster: pimlicoClient,
+    });
+    console.log(`   ✅ Smart Account Client ready`);
 
     // ============= PREPARE TRANSACTION =============
-    console.log(`\n📝 STEP 5: Preparing transaction...`);
+    console.log(`\n📝 STEP 7: Preparing USDC transfer...`);
     const txData = encodeFunctionData({
       abi: USDC_ABI,
       functionName: 'transfer',
@@ -265,63 +213,41 @@ export async function sendUSDCWithPaymaster(
     });
     console.log(`   ✅ Transaction data encoded`);
 
-    // ============= TRY ALCHEMY SPONSORSHIP =============
-    let gasSponsored = false;
-    let gasParams: any = {};
-
-    if (hasAlchemy) {
-      console.log(`\n⛽ STEP 6: Requesting Alchemy gas sponsorship...`);
-      const sponsorship = await requestAlchemySponsorship(
-        userAddress as Address,
-        txData,
-        network
-      );
-      
-      if (sponsorship.sponsored && sponsorship.maxFeePerGas) {
-        gasParams = {
-          maxFeePerGas: sponsorship.maxFeePerGas,
-          maxPriorityFeePerGas: sponsorship.maxPriorityFeePerGas
-        };
-        gasSponsored = true;
-        console.log(`   ✅ Gas will be sponsored by Alchemy!`);
-      } else {
-        console.log(`   ⚠️  Sponsorship unavailable - user will pay gas`);
-      }
-    }
-
-    // ============= SEND TRANSACTION =============
-    const stepNum = hasAlchemy ? 7 : 6;
-    console.log(`\n✍️  STEP ${stepNum}: Sending transaction...`);
+    // ============= SEND GASLESS TRANSACTION =============
+    console.log(`\n✍️  STEP 8: Sending gasless transaction...`);
+    console.log(`   🎉 Gas sponsored by Coinbase Paymaster!`);
     
-    const txHash = await walletClient.sendTransaction({
+    const txHash = await smartAccountClient.sendTransaction({
       to: USDC_ADDRESS as Address,
       data: txData as Hex,
-      ...gasParams
+      value: BigInt(0),
     });
     
     console.log(`   ✅ Transaction sent!`);
     console.log(`   Hash: ${txHash}`);
 
     // ============= WAIT FOR CONFIRMATION =============
-    console.log(`\n⏳ STEP ${stepNum + 1}: Waiting for confirmation...`);
+    console.log(`\n⏳ STEP 9: Waiting for confirmation...`);
     const receipt = await publicClient.waitForTransactionReceipt({
       hash: txHash as Hex
     });
     console.log(`   ✅ Confirmed!`);
     console.log(`   Block: ${receipt.blockNumber}`);
-    console.log(`   Gas Used: ${receipt.gasUsed}`);
+    console.log(`   Gas Used: ${receipt.gasUsed} (Sponsored)`);
 
     // ============= GENERATE EXPLORER URL =============
-    const explorerUrl = `https://basescan.org/tx/${txHash}`;
+    const explorerUrl = network === 'base-mainnet'
+      ? `https://basescan.org/tx/${txHash}`
+      : `https://sepolia.basescan.org/tx/${txHash}`;
 
     // ============= SUCCESS =============
     console.log(`\n${'═'.repeat(70)}`);
-    console.log(`✅ TRANSFER SUCCESSFUL!`);
+    console.log(`✅ GASLESS TRANSFER SUCCESSFUL!`);
     console.log(`${'═'.repeat(70)}`);
-    console.log(`From: ${userAddress}`);
+    console.log(`From: ${smartAccountAddress}`);
     console.log(`To: ${toAddress}`);
     console.log(`Amount: ${amountUSDC} USDC`);
-    console.log(`Gas: ${gasSponsored ? 'Sponsored by Alchemy ✅' : 'Paid by user'}`);
+    console.log(`Gas: ✨ SPONSORED by Coinbase (FREE)`);
     console.log(`Explorer: ${explorerUrl}`);
     console.log(`${'═'.repeat(70)}\n`);
 
@@ -330,14 +256,22 @@ export async function sendUSDCWithPaymaster(
       transactionHash: txHash,
       explorerUrl,
       blockNumber: receipt.blockNumber.toString(),
-      gasSponsored,
-      userAddress
+      gasSponsored: true, // ✅ Gas is sponsored!
+      userAddress: smartAccountAddress
     };
   } catch (error: any) {
     console.error(`\n${'═'.repeat(70)}`);
-    console.error(`❌ TRANSFER FAILED`);
+    console.error(`❌ GASLESS TRANSFER FAILED`);
     console.error(`${'═'.repeat(70)}`);
     console.error(`Error: ${error.message}`);
+    
+    // Check for common errors
+    if (error.message?.includes('insufficient funds')) {
+      console.error(`\n💡 TIP: This might be a Smart Account deployment issue.`);
+      console.error(`   - Make sure the Smart Account has been deployed`);
+      console.error(`   - Or ensure Coinbase paymaster supports deployment + execution`);
+    }
+    
     console.error(`${'═'.repeat(70)}\n`);
     
     throw new Error(`Transfer failed: ${error.message}`);

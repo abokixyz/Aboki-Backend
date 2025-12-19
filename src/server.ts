@@ -15,6 +15,7 @@ import userRoutes from './routes/userRoutes';
 import inviteRoutes from './routes/inviteRoutes';
 import walletRoutes from './routes/walletRoutes';
 import onrampRoutes from './routes/onrampRoutes';
+import offrampRoutes from './routes/offrampRoutes';
 import transferRoutes from './routes/transferRoutes';
 
 // Initialize express app
@@ -59,6 +60,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/onramp', onrampRoutes);
+app.use('/api/offramp', offrampRoutes);
 app.use('/api/transfer', transferRoutes);
 
 // Health check
@@ -122,7 +124,8 @@ app.listen(PORT, () => {
   ║   👥 User Endpoints:    https://apis.aboki.xyz/api/users     ║
   ║   🎫 Invite Endpoints:  https://apis.aboki.xyz/api/invites   ║
   ║   💰 Wallet Endpoints:  https://apis.aboki.xyz/api/wallet    ║
-  ║   💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp    ║
+  ║   💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp  
+  💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp   ║
   ║   💸 Transfer Endpoints: https://apis.aboki.xyz/api/transfer ║
   ║                                                           ║
   ╚═══════════════════════════════════════════════════════════╝

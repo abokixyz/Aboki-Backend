@@ -1,4 +1,11 @@
 // ============= src/server.ts =============
+/**
+ * Express Server Configuration
+ * 
+ * Main entry point for the API
+ * Configures middleware, routes, and error handling
+ */
+
 import express, { Application, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -21,23 +28,32 @@ import transferRoutes from './routes/transferRoutes';
 // Initialize express app
 const app: Application = express();
 
+// ============= MIDDLEWARE =============
+
 // Enhanced CORS configuration
-app.use(cors({
-  origin: '*', // Allow all origins for development/testing
+const corsOptions = {
+  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : '*',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-lenco-signature'],
   exposedHeaders: ['Content-Length', 'X-Requested-With']
-}));
+};
+
+app.use(cors(corsOptions));
 
 // Handle OPTIONS preflight requests
-app.options('*', cors());
+app.options('*', cors(corsOptions));
 
+// Body parsers
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ============= DATABASE =============
+
 // Connect to MongoDB
 connectDB();
+
+// ============= DOCUMENTATION =============
 
 // Swagger JSON endpoint with CORS headers
 app.get('/api-docs/swagger.json', (req: Request, res: Response) => {
@@ -46,89 +62,186 @@ app.get('/api-docs/swagger.json', (req: Request, res: Response) => {
   res.send(swaggerSpec);
 });
 
-// Swagger documentation
+// Swagger documentation UI
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   swaggerOptions: {
     url: '/api-docs/swagger.json',
-    persistAuthorization: true
-  }
+    persistAuthorization: true,
+    displayOperationId: true
+  },
+  customCss: '.swagger-ui .topbar { display: none }'
 }));
 
-// API Routes
+// ============= API ROUTES =============
+
+/**
+ * Auth Routes
+ * @route /api/auth
+ * - POST /register - Register new user
+ * - POST /login - Login user
+ * - POST /refresh - Refresh JWT token
+ */
 app.use('/api/auth', authRoutes);
+
+/**
+ * User Routes
+ * @route /api/users
+ * - GET / - Get user profile
+ * - PUT / - Update user profile
+ * - GET /transactions - Get user transactions
+ */
 app.use('/api/users', userRoutes);
+
+/**
+ * Invite Routes
+ * @route /api/invites
+ * - POST / - Create invite
+ * - GET / - Get invites
+ * - POST /redeem - Redeem invite
+ */
 app.use('/api/invites', inviteRoutes);
+
+/**
+ * Wallet Routes
+ * @route /api/wallet
+ * - POST /create - Create Smart Account
+ * - GET /balance - Get wallet balance
+ * - POST /import - Import wallet
+ */
 app.use('/api/wallet', walletRoutes);
+
+/**
+ * Onramp Routes (NGN → USDC)
+ * @route /api/onramp
+ * - GET /rate - Get onramp rate
+ * - POST /initiate - Initiate onramp
+ */
 app.use('/api/onramp', onrampRoutes);
+
+/**
+ * Offramp Routes (USDC → NGN)
+ * @route /api/offramp
+ * - GET /rate - Get offramp rate
+ * - POST /initiate - Initiate offramp
+ * - POST /confirm-transfer - Confirm blockchain transfer
+ * - GET /status/:reference - Get transaction status
+ * - GET /history - Get transaction history
+ * - POST /webhook/lenco - Lenco webhook
+ * - POST /beneficiaries - Add beneficiary
+ * - GET /beneficiaries - Get beneficiaries
+ * - DELETE /beneficiaries/:id - Delete beneficiary
+ * - PUT /beneficiaries/:id/default - Set default beneficiary
+ * - GET /frequent-accounts - Get frequent accounts
+ */
 app.use('/api/offramp', offrampRoutes);
+
+/**
+ * Transfer Routes (USDC transfer)
+ * @route /api/transfer
+ * - POST /send - Send USDC
+ * - GET /history - Get transfer history
+ */
 app.use('/api/transfer', transferRoutes);
 
-// Health check
+// ============= HEALTH CHECK =============
+
+/**
+ * Health Check Endpoint
+ * Returns API status and available endpoints
+ */
 app.get('/', (req: Request, res: Response) => {
   res.json({
     success: true,
-    message: 'API is running',
+    message: 'Aboki API is running',
     version: '1.0.0',
+    timestamp: new Date().toISOString(),
     endpoints: {
       auth: '/api/auth',
       users: '/api/users',
       invites: '/api/invites',
       wallet: '/api/wallet',
       onramp: '/api/onramp',
+      offramp: '/api/offramp',
       transfer: '/api/transfer',
       docs: '/api-docs'
     }
   });
 });
 
-// 404 handler
+// ============= 404 HANDLER =============
+
+/**
+ * 404 Not Found Handler
+ */
 app.use((req: Request, res: Response) => {
   res.status(404).json({
     success: false,
     error: 'Route not found',
     path: req.path,
+    method: req.method,
     availableRoutes: [
       '/api/auth',
       '/api/users',
       '/api/invites',
       '/api/wallet',
       '/api/onramp',
+      '/api/offramp',
       '/api/transfer',
       '/api-docs'
     ]
   });
 });
 
-// Error handler
+// ============= ERROR HANDLER =============
+
+/**
+ * Global Error Handler
+ * Catches all errors and returns standardized response
+ */
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('❌ Error:', err.message);
   console.error('Stack:', err.stack);
-  
+
   res.status(500).json({
     success: false,
-    error: err.message || 'Internal Server Error'
+    error: err.message || 'Internal Server Error',
+    path: req.path
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
+// ============= SERVER START =============
+
+const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
 app.listen(PORT, () => {
+  const apiUrl = process.env.API_BASE_URL || `http://localhost:${PORT}`;
+
   console.log(`
-  ╔═══════════════════════════════════════════════════════════╗
-  ║                                                           ║
-  ║   🚀 Server running on port ${PORT}                         ║
-  ║                                                           ║
-  ║   📚 API Documentation: https://apis.aboki.xyz/api-docs      ║
-  ║   🔐 Auth Endpoints:    https://apis.aboki.xyz/api/auth      ║
-  ║   👥 User Endpoints:    https://apis.aboki.xyz/api/users     ║
-  ║   🎫 Invite Endpoints:  https://apis.aboki.xyz/api/invites   ║
-  ║   💰 Wallet Endpoints:  https://apis.aboki.xyz/api/wallet    ║
-  ║   💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp  
-  💳 Onramp Endpoints:  https://apis.aboki.xyz/api/onramp   ║
-  ║   💸 Transfer Endpoints: https://apis.aboki.xyz/api/transfer ║
-  ║                                                           ║
-  ╚═══════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════╗
+║                                                                ║
+║   🚀 ABOKI API SERVER                                         ║
+║                                                                ║
+║   Status:      ✅ Running                                      ║
+║   Port:        ${PORT}                                           ║
+║   Environment: ${NODE_ENV}                                      ║
+║   URL:         ${apiUrl}                                ║
+║                                                                ║
+║   📚 API Documentation: ${apiUrl}/api-docs            ║
+║   🔐 Auth Endpoints:    ${apiUrl}/api/auth            ║
+║   👥 User Endpoints:    ${apiUrl}/api/users           ║
+║   🎫 Invite Endpoints:  ${apiUrl}/api/invites         ║
+║   💰 Wallet Endpoints:  ${apiUrl}/api/wallet          ║
+║   💳 Onramp Endpoints:  ${apiUrl}/api/onramp          ║
+║   💸 Offramp Endpoints: ${apiUrl}/api/offramp         ║
+║   🔄 Transfer Endpoints: ${apiUrl}/api/transfer        ║
+║                                                                ║
+║   ✅ All Routes Registered                                    ║
+║   ✅ MongoDB Connected                                        ║
+║   ✅ CORS Enabled                                             ║
+║   ✅ Swagger Docs Available                                   ║
+║                                                                ║
+╚════════════════════════════════════════════════════════════════╝
   `);
 });
 

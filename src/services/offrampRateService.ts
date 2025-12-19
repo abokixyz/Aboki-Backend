@@ -13,8 +13,12 @@ import axios from 'axios';
 
 // ============= CONFIGURATION =============
 
-const PAYCREST_API_URL = process.env.PAYCREST_API_URL || 'https://api.paycrest.io/rates';
+const PAYCREST_API_BASE_URL = process.env.PAYCREST_API_BASE_URL || 'https://api.paycrest.io';
 const PAYCREST_API_KEY = process.env.PAYCREST_API_KEY || '';
+const PAYCREST_RATE_ENDPOINT = '/v1/rates'; // or '/v1/rates' depending on Paycrest version
+
+// Construct full URL
+const PAYCREST_RATE_URL = `${PAYCREST_API_BASE_URL}${PAYCREST_RATE_ENDPOINT}`;
 
 // Offramp constants
 export const MIN_OFFRAMP = 10; // Minimum 10 USDC
@@ -87,7 +91,7 @@ async function getBaseRateFromPaycrest(): Promise<number> {
 
     console.log('📊 Fetching rate from Paycrest...');
 
-    const response = await axios.get(PAYCREST_API_URL, {
+    const response = await axios.get(PAYCREST_RATE_URL, {
       headers: {
         'Authorization': `Bearer ${PAYCREST_API_KEY}`,
         'Content-Type': 'application/json'

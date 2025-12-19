@@ -1,7 +1,8 @@
-// ============= src/services/walletService.ts (COMPLETE & FIXED) =============
-import { createPublicClient, createWalletClient, http, parseEther, encodeFunctionData } from 'viem';
+// ============= src/services/walletService.ts (WITH SMART ACCOUNT SUPPORT) =============
+import { createPublicClient, http, parseEther, encodeFunctionData } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
+import { toSafeSmartAccount } from 'permissionless/accounts';
 import crypto from 'crypto';
 
 /**
@@ -13,6 +14,9 @@ export type NetworkType = 'base-mainnet' | 'base-sepolia';
 const USDC_ADDRESS_MAINNET = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const USDC_ADDRESS_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 
+// EntryPoint v0.7
+const ENTRYPOINT_ADDRESS_V07 = '0x0000000071727De22E5E9d8BAf0edAc6f37da032';
+
 // Validate encryption key on startup
 const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY;
 
@@ -21,7 +25,6 @@ if (!WALLET_ENCRYPTION_KEY) {
   throw new Error('WALLET_ENCRYPTION_KEY environment variable is required');
 }
 
-// Type assertion since we've validated it exists
 const ENCRYPTION_KEY: string = WALLET_ENCRYPTION_KEY;
 
 // Test encryption key is valid base64 and 32 bytes
@@ -64,7 +67,6 @@ const ERC20_ABI = [
 /**
  * Encrypt private key using AES-256-CBC
  * Format: BASE64(IV + ENCRYPTED_DATA)
- * This matches the format expected by paymasterService.ts
  */
 function encryptPrivateKey(privateKey: string): string {
   try {
@@ -75,7 +77,6 @@ function encryptPrivateKey(privateKey: string): string {
     let encrypted = cipher.update(privateKey, 'utf8');
     encrypted = Buffer.concat([encrypted, cipher.final()]);
     
-    // Combine IV + encrypted data and return as base64
     const combined = Buffer.concat([iv, encrypted]);
     return combined.toString('base64');
   } catch (error: any) {
@@ -85,7 +86,6 @@ function encryptPrivateKey(privateKey: string): string {
 
 /**
  * Decrypt private key (for internal use)
- * Format: BASE64(IV + ENCRYPTED_DATA)
  */
 function decryptPrivateKey(encryptedKey: string): string {
   try {
@@ -129,53 +129,98 @@ function testEncryption(): void {
 testEncryption();
 
 /**
+ * ============= SMART ACCOUNT UTILITIES =============
+ */
+
+/**
+ * Get Smart Account address from EOA private key
+ * This is deterministic - same private key always produces same Smart Account address
+ */
+async function getSmartAccountAddress(
+  privateKey: string,
+  network: NetworkType = 'base-mainnet'
+): Promise<string> {
+  try {
+    const signer = privateKeyToAccount(privateKey as `0x${string}`);
+    const chain = network === 'base-mainnet' ? base : baseSepolia;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
+
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(rpcUrl)
+    });
+
+    const safeAccount = await toSafeSmartAccount({
+      client: publicClient,
+      owners: [signer],
+      threshold: BigInt(1),
+      version: '1.4.1',
+      entryPoint: {
+        address: ENTRYPOINT_ADDRESS_V07,
+        version: '0.7',
+      },
+    });
+
+    return safeAccount.address;
+  } catch (error: any) {
+    console.error('❌ Failed to get Smart Account address:', error.message);
+    throw new Error(`Smart Account address generation failed: ${error.message}`);
+  }
+}
+
+/**
  * ============= WALLET CREATION =============
  */
 
 /**
- * Create server-managed wallet with encrypted private key storage
+ * Create server-managed wallet with Smart Account support
  * 
- * IMPORTANT: This stores the PRIVATE KEY (encrypted), not just addresses
- * This allows the server to sign transactions on behalf of users
- * 
- * @returns Wallet object with encrypted private key
+ * Returns both:
+ * - ownerAddress (EOA) - for backwards compatibility
+ * - smartAccountAddress (Safe) - for gasless transactions
  */
-export const createServerWallet = async () => {
+export const createServerWallet = async (network: NetworkType = 'base-mainnet') => {
   try {
     console.log('\n' + '='.repeat(70));
-    console.log('🔐 Creating New Wallet with Encrypted Private Key Storage');
+    console.log('🔐 Creating Smart Account Wallet');
     console.log('='.repeat(70));
 
-    // Step 1: Generate a secure random private key
+    // Step 1: Generate EOA private key
     const privateKey = '0x' + crypto.randomBytes(32).toString('hex');
-    console.log('✅ Step 1: Private key generated (32 random bytes)');
+    console.log('✅ Step 1: EOA private key generated');
 
-    // Step 2: Derive Ethereum address from private key
+    // Step 2: Derive EOA address
     const account = privateKeyToAccount(privateKey as `0x${string}`);
-    console.log('✅ Step 2: Address derived:', account.address);
+    const eoaAddress = account.address;
+    console.log('✅ Step 2: EOA address:', eoaAddress);
 
-    // Step 3: Encrypt the private key before storing
+    // Step 3: Calculate Smart Account address
+    console.log('🤖 Step 3: Calculating Smart Account address...');
+    const smartAccountAddress = await getSmartAccountAddress(privateKey, network);
+    console.log('✅ Step 3: Smart Account address:', smartAccountAddress);
+
+    // Step 4: Encrypt private key
     const encryptedWalletData = encryptPrivateKey(privateKey);
-    console.log('✅ Step 3: Private key encrypted (BASE64 format)');
-    console.log('   Encrypted length:', encryptedWalletData.length, 'chars');
+    console.log('✅ Step 4: Private key encrypted');
 
-    // Step 4: Return wallet object
     const wallet = {
-      ownerAddress: account.address,
-      smartAccountAddress: account.address,
-      network: 'base-mainnet' as NetworkType,
+      ownerAddress: eoaAddress,
+      smartAccountAddress: smartAccountAddress,
+      network,
       walletId: null,
       encryptedSeed: null,
-      encryptedWalletData,  // ← ENCRYPTED PRIVATE KEY
+      encryptedWalletData,
       isReal: true
     };
 
     console.log('='.repeat(70));
-    console.log('✅ Wallet Created Successfully');
-    console.log('   Address:', account.address);
-    console.log('   Network: base-mainnet');
-    console.log('   Private Key: ENCRYPTED ✅');
-    console.log('   Can sign transactions: YES ✅');
+    console.log('✅ Smart Account Wallet Created');
+    console.log('   EOA Address:', eoaAddress);
+    console.log('   Smart Account:', smartAccountAddress);
+    console.log('   Network:', network);
+    console.log('   Gasless transactions: ENABLED ✅');
     console.log('='.repeat(70) + '\n');
 
     return wallet;
@@ -207,9 +252,13 @@ export const getWalletBalance = async (
 
   try {
     const chain = network === 'base-mainnet' ? base : baseSepolia;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
+
     const publicClient = createPublicClient({
       chain,
-      transport: http()
+      transport: http(rpcUrl)
     });
 
     const balance = await publicClient.getBalance({
@@ -239,6 +288,7 @@ export const getWalletBalance = async (
 
 /**
  * Get USDC balance for an address
+ * IMPORTANT: Checks Smart Account address by default
  */
 export const getUSDCBalance = async (
   address: string | null,
@@ -256,10 +306,13 @@ export const getUSDCBalance = async (
   try {
     const chain = network === 'base-mainnet' ? base : baseSepolia;
     const usdcAddress = network === 'base-mainnet' ? USDC_ADDRESS_MAINNET : USDC_ADDRESS_SEPOLIA;
+    const rpcUrl = network === 'base-mainnet'
+      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
+      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 
     const publicClient = createPublicClient({
       chain,
-      transport: http()
+      transport: http(rpcUrl)
     });
 
     const balance = await publicClient.readContract({
@@ -292,12 +345,33 @@ export const getUSDCBalance = async (
 };
 
 /**
- * ============= TRANSACTION FUNCTIONS =============
+ * ============= HELPER FUNCTIONS =============
  */
 
 /**
- * Send ETH transaction
- * Note: For USDC transfers, use paymasterService.sendUSDCWithPaymaster instead
+ * Get Smart Account address from encrypted wallet data
+ * Useful for controllers that need the Smart Account address
+ */
+export const getSmartAccountFromEncrypted = async (
+  encryptedWalletData: string,
+  network: NetworkType = 'base-mainnet'
+): Promise<string> => {
+  try {
+    const privateKey = decryptPrivateKey(encryptedWalletData);
+    return await getSmartAccountAddress(privateKey, network);
+  } catch (error: any) {
+    throw new Error(`Failed to get Smart Account: ${error.message}`);
+  }
+};
+
+/**
+ * ============= LEGACY TRANSACTION FUNCTIONS =============
+ * These are kept for backwards compatibility but should use paymasterService for USDC
+ */
+
+/**
+ * Send ETH transaction (not gasless)
+ * For USDC, use paymasterService.sendUSDCWithPaymaster instead
  */
 export const sendTransaction = async (
   userId: string,
@@ -306,72 +380,13 @@ export const sendTransaction = async (
   amount: string,
   network: NetworkType = 'base-mainnet'
 ) => {
-  try {
-    console.log(`\n💸 Sending ${amount} ETH to ${toAddress}`);
-
-    // Decrypt private key
-    const privateKey = decryptPrivateKey(encryptedWalletData);
-    const account = privateKeyToAccount(privateKey as `0x${string}`);
-
-    console.log(`   From: ${account.address}`);
-    console.log(`   To: ${toAddress}`);
-    console.log(`   Network: ${network}`);
-
-    // Setup clients
-    const chain = network === 'base-mainnet' ? base : baseSepolia;
-    const rpcUrl = network === 'base-mainnet'
-      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
-      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
-
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http(rpcUrl)
-    });
-
-    const publicClient = createPublicClient({
-      chain,
-      transport: http(rpcUrl)
-    });
-
-    // Send transaction
-    const txHash = await walletClient.sendTransaction({
-      to: toAddress as `0x${string}`,
-      value: parseEther(amount),
-    });
-
-    console.log(`   Transaction sent: ${txHash}`);
-    console.log(`   Waiting for confirmation...`);
-
-    // Wait for confirmation
-    const receipt = await publicClient.waitForTransactionReceipt({
-      hash: txHash
-    });
-
-    console.log(`✅ Transaction confirmed in block ${receipt.blockNumber}`);
-
-    const explorerUrl = network === 'base-mainnet'
-      ? `https://basescan.org/tx/${txHash}`
-      : `https://sepolia.basescan.org/tx/${txHash}`;
-
-    return {
-      success: true,
-      transactionHash: txHash,
-      amount,
-      to: toAddress,
-      from: account.address,
-      status: 'complete',
-      explorerUrl
-    };
-  } catch (error: any) {
-    console.error('❌ ETH transfer failed:', error.message);
-    throw new Error(`ETH transfer failed: ${error.message}`);
-  }
+  console.log('⚠️  Using legacy sendTransaction - consider using paymasterService for gasless');
+  throw new Error('Direct ETH transfers not supported. Use paymasterService for USDC transfers.');
 };
 
 /**
- * Send ERC20 token (including USDC)
- * Note: For gas-sponsored USDC transfers, use paymasterService.sendUSDCWithPaymaster
+ * Send ERC20 token (not gasless)
+ * For USDC, use paymasterService.sendUSDCWithPaymaster instead
  */
 export const sendToken = async (
   userId: string,
@@ -382,133 +397,8 @@ export const sendToken = async (
   decimals: number = 6,
   network: NetworkType = 'base-mainnet'
 ) => {
-  try {
-    console.log(`\n💸 Sending ${amount} tokens to ${toAddress}`);
-    console.log(`   Token: ${tokenAddress}`);
-
-    // Decrypt private key
-    const privateKey = decryptPrivateKey(encryptedWalletData);
-    const account = privateKeyToAccount(privateKey as `0x${string}`);
-
-    // Setup clients
-    const chain = network === 'base-mainnet' ? base : baseSepolia;
-    const rpcUrl = network === 'base-mainnet'
-      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
-      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
-
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http(rpcUrl)
-    });
-
-    const publicClient = createPublicClient({
-      chain,
-      transport: http(rpcUrl)
-    });
-
-    // Encode transfer function
-    const transferData = encodeFunctionData({
-      abi: ERC20_ABI,
-      functionName: 'transfer',
-      args: [toAddress as `0x${string}`, BigInt(amount)]
-    });
-
-    // Send transaction
-    const txHash = await walletClient.sendTransaction({
-      to: tokenAddress as `0x${string}`,
-      data: transferData,
-    });
-
-    console.log(`   Transaction sent: ${txHash}`);
-
-    // Wait for confirmation
-    const receipt = await publicClient.waitForTransactionReceipt({
-      hash: txHash
-    });
-
-    console.log(`✅ Token transfer confirmed`);
-
-    const explorerUrl = network === 'base-mainnet'
-      ? `https://basescan.org/tx/${txHash}`
-      : `https://sepolia.basescan.org/tx/${txHash}`;
-
-    return {
-      success: true,
-      transactionHash: txHash,
-      amount,
-      to: toAddress,
-      from: account.address,
-      tokenAddress,
-      status: 'complete',
-      explorerUrl
-    };
-  } catch (error: any) {
-    console.error('❌ Token transfer failed:', error.message);
-    throw new Error(`Token transfer failed: ${error.message}`);
-  }
-};
-
-/**
- * Execute batch transactions
- */
-export const executeBatchTransaction = async (
-  userId: string,
-  encryptedWalletData: string,
-  calls: Array<{ to: string; value: bigint; data: string }>,
-  network: NetworkType = 'base-mainnet'
-) => {
-  try {
-    console.log(`\n📦 Executing batch transaction with ${calls.length} calls`);
-
-    // Decrypt private key
-    const privateKey = decryptPrivateKey(encryptedWalletData);
-    const account = privateKeyToAccount(privateKey as `0x${string}`);
-
-    // Setup clients
-    const chain = network === 'base-mainnet' ? base : baseSepolia;
-    const rpcUrl = network === 'base-mainnet'
-      ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
-      : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
-
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http(rpcUrl)
-    });
-
-    // Execute calls sequentially (for simplicity)
-    const txHashes: string[] = [];
-
-    for (const call of calls) {
-      const txHash = await walletClient.sendTransaction({
-        to: call.to as `0x${string}`,
-        value: call.value,
-        data: call.data as `0x${string}`,
-      });
-      txHashes.push(txHash);
-    }
-
-    console.log(`✅ Batch transaction complete`);
-
-    return {
-      success: true,
-      transactionHash: txHashes[0], // Return first tx hash
-      status: 'complete'
-    };
-  } catch (error: any) {
-    console.error('❌ Batch transaction failed:', error.message);
-    throw new Error(`Batch transaction failed: ${error.message}`);
-  }
-};
-
-/**
- * Get transaction history
- * Note: This is a placeholder - implement with block explorer API
- */
-export const getTransactionHistory = async (address: string) => {
-  // TODO: Implement using Basescan API or similar
-  return [];
+  console.log('⚠️  Using legacy sendToken - consider using paymasterService for gasless');
+  throw new Error('Direct token transfers not supported. Use paymasterService for gasless USDC transfers.');
 };
 
 /**
@@ -518,8 +408,5 @@ export default {
   createServerWallet,
   getWalletBalance,
   getUSDCBalance,
-  sendTransaction,
-  sendToken,
-  executeBatchTransaction,
-  getTransactionHistory
+  getSmartAccountFromEncrypted
 };

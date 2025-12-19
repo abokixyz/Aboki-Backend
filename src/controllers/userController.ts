@@ -1,4 +1,4 @@
-// ============= src/controllers/userController.ts (UPDATED) =============
+// ============= src/controllers/userController.ts (SMART ACCOUNT VERSION) =============
 import { Request, Response } from 'express';
 import User from '../models/User';
 import {
@@ -15,8 +15,9 @@ import {
 export const getMe = async (req: Request, res: Response): Promise<void> => {
   try {
     const user = await User.findById(req.user?.id)
-      .select('-password')
-      .populate('createdInviteCodes', 'code isUsed createdAt');
+      .select('-passkey')
+      .populate('createdInviteCodes', 'code usedBy createdAt')
+      .populate('invitedBy', 'username name email');
 
     if (!user) {
       res.status(404).json({
@@ -97,7 +98,10 @@ export const updateMe = async (req: Request, res: Response): Promise<void> => {
 
     await user.save();
 
-    const updatedUser = await User.findById(user._id).select('-password');
+    const updatedUser = await User.findById(user._id)
+      .select('-passkey')
+      .populate('createdInviteCodes', 'code usedBy createdAt')
+      .populate('invitedBy', 'username name email');
 
     res.status(200).json({
       success: true,
@@ -146,7 +150,8 @@ export const getMyWallet = async (req: Request, res: Response): Promise<void> =>
         network: user.wallet.network,
         isReal: user.wallet.isReal || false,
         userName: user.name,
-        username: user.username
+        username: user.username,
+        note: 'smartAccountAddress is the primary address for gasless transactions'
       }
     });
   } catch (error: any) {
@@ -183,24 +188,42 @@ export const getMyBalance = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const address = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
+    const smartAccountAddress = user.wallet.smartAccountAddress || user.wallet.ownerAddress;
+    const eoaAddress = user.wallet.ownerAddress;
     const network = (user.wallet.network || 'base-mainnet') as NetworkType;
 
-    // Get both ETH and USDC balances
-    const ethBalance = await getWalletBalance(address, network);
-    const usdcBalance = await getUSDCBalance(address, network);
+    // Get balances for both addresses
+    const smartAccountEthBalance = await getWalletBalance(smartAccountAddress, network);
+    const smartAccountUsdcBalance = await getUSDCBalance(smartAccountAddress, network);
+    
+    const eoaEthBalance = await getWalletBalance(eoaAddress, network);
+    const eoaUsdcBalance = await getUSDCBalance(eoaAddress, network);
 
     res.status(200).json({
       success: true,
       data: {
-        address: user.wallet.ownerAddress,
+        // Primary addresses (Smart Account)
+        address: smartAccountAddress,
+        ownerAddress: eoaAddress,
         smartAccountAddress: user.wallet.smartAccountAddress,
         network: user.wallet.network,
-        ethBalance: ethBalance.balance,
-        usdcBalance: usdcBalance.balance,
+        // Primary balances (Smart Account - used for transactions)
+        ethBalance: smartAccountEthBalance.balance,
+        usdcBalance: smartAccountUsdcBalance.balance,
+        // Detailed breakdown
         balances: {
-          ETH: ethBalance,
-          USDC: usdcBalance
+          smartAccount: {
+            address: smartAccountAddress,
+            ETH: smartAccountEthBalance,
+            USDC: smartAccountUsdcBalance,
+            note: 'Primary address for gasless transactions'
+          },
+          eoa: {
+            address: eoaAddress,
+            ETH: eoaEthBalance,
+            USDC: eoaUsdcBalance,
+            note: 'Original address (for reference)'
+          }
         }
       }
     });

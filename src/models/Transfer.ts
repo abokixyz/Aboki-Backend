@@ -22,6 +22,9 @@ export interface ITransfer extends Document {
   network: string;
   // NEW: Auto-claim support
   pendingClaimByNewUser?: boolean; // Flag for new user signup
+  // ✅ NEW: Passkey verification fields
+  verifiedWithPasskey: boolean;
+  verificationTimestamp?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -108,6 +111,17 @@ const transferSchema = new Schema<ITransfer>(
     pendingClaimByNewUser: {
       type: Boolean,
       default: false
+    },
+    // ✅ NEW: Passkey verification fields
+    verifiedWithPasskey: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    verificationTimestamp: {
+      type: Date,
+      sparse: true,
+      index: true
     }
   },
   {
@@ -118,5 +132,8 @@ const transferSchema = new Schema<ITransfer>(
 transferSchema.index({ linkCode: 1, status: 1 });
 transferSchema.index({ fromUser: 1, createdAt: -1 });
 transferSchema.index({ toUser: 1, createdAt: -1 });
+// ✅ NEW: Indexes for passkey verification queries
+transferSchema.index({ verifiedWithPasskey: 1, verificationTimestamp: -1 });
+transferSchema.index({ fromUser: 1, verifiedWithPasskey: 1 });
 
 export default mongoose.model<ITransfer>('Transfer', transferSchema);

@@ -1,4 +1,4 @@
-// ============= src/controllers/transferController.ts (UPDATED) =============
+// ============= src/controllers/transferController.ts (WITH PASSKEY VERIFICATION) =============
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import User from '../models/User';
@@ -14,6 +14,33 @@ const LINK_EXPIRY_DAYS = 30;
 function generateLinkCode(): string {
   return `ABOKI_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`.toUpperCase();
 }
+
+/**
+ * MIDDLEWARE: Verify transaction has been verified with passkey
+ * This ensures user re-authenticated before sending
+ */
+export const verifyTransactionPasskey = async (req: Request, res: Response, next: Function): Promise<void> => {
+  try {
+    const transactionVerified = (req as any).transactionVerified;
+    
+    if (!transactionVerified) {
+      res.status(401).json({
+        success: false,
+        error: 'Transaction must be verified with passkey first',
+        requiresPasskeyVerification: true
+      });
+      return;
+    }
+
+    next();
+  } catch (error) {
+    console.error('❌ Error verifying transaction passkey:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server Error'
+    });
+  }
+};
 
 /**
  * @desc    Validate if username exists in the system
@@ -152,13 +179,24 @@ export const getRecentContacts = async (req: Request, res: Response): Promise<vo
 };
 
 /**
- * @desc    Send USDC to another user by username
+ * @desc    Send USDC to another user by username (REQUIRES PASSKEY VERIFICATION)
  * @route   POST /api/transfer/send/username
- * @access  Private
+ * @access  Private - Requires passkey verification
  */
 export const sendToUsername = async (req: Request, res: Response): Promise<void> => {
   try {
     const { username, amount, message } = req.body;
+
+    // ✅ VERIFY PASSKEY SIGNATURE
+    const passkeyVerified = (req as any).passkeyVerified;
+    if (!passkeyVerified) {
+      res.status(401).json({
+        success: false,
+        error: 'Transaction must be verified with passkey first',
+        requiresPasskeyVerification: true
+      });
+      return;
+    }
 
     if (!username || !amount) {
       res.status(400).json({
@@ -248,10 +286,12 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
       transferType: 'USERNAME',
       status: 'PENDING',
       message,
-      network
+      network,
+      verifiedWithPasskey: true, // ✅ Mark as passkey-verified
+      verificationTimestamp: new Date()
     });
 
-    console.log(`💸 Username transfer: @${sender.username} → @${recipient.username} (${amountNum} USDC)`);
+    console.log(`💸 Username transfer (passkey verified): @${sender.username} → @${recipient.username} (${amountNum} USDC)`);
 
     try {
       const privateKey = sender.wallet.encryptedWalletData;
@@ -270,7 +310,7 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
       // CONTACT TRACKING: Update or create contact record
       await updateContact(sender._id, recipient._id, recipient.username, recipientAddress, amountNum);
 
-      console.log(`✅ Transfer completed: ${result.transactionHash}`);
+      console.log(`✅ Passkey-verified transfer completed: ${result.transactionHash}`);
 
       res.status(200).json({
         success: true,
@@ -283,7 +323,8 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
           transactionHash: result.transactionHash,
           explorerUrl: result.explorerUrl,
           gasSponsored: result.gasSponsored,
-          message: transfer.message
+          message: transfer.message,
+          verifiedWithPasskey: true
         }
       });
     } catch (txError: any) {
@@ -307,13 +348,24 @@ export const sendToUsername = async (req: Request, res: Response): Promise<void>
 };
 
 /**
- * @desc    Send USDC to external wallet
+ * @desc    Send USDC to external wallet (REQUIRES PASSKEY VERIFICATION)
  * @route   POST /api/transfer/send/external
- * @access  Private
+ * @access  Private - Requires passkey verification
  */
 export const sendToExternal = async (req: Request, res: Response): Promise<void> => {
   try {
     const { address, amount, message } = req.body;
+
+    // ✅ VERIFY PASSKEY SIGNATURE
+    const passkeyVerified = (req as any).passkeyVerified;
+    if (!passkeyVerified) {
+      res.status(401).json({
+        success: false,
+        error: 'Transaction must be verified with passkey first',
+        requiresPasskeyVerification: true
+      });
+      return;
+    }
 
     if (!address || !amount) {
       res.status(400).json({
@@ -381,10 +433,12 @@ export const sendToExternal = async (req: Request, res: Response): Promise<void>
       transferType: 'EXTERNAL',
       status: 'PENDING',
       message,
-      network
+      network,
+      verifiedWithPasskey: true, // ✅ Mark as passkey-verified
+      verificationTimestamp: new Date()
     });
 
-    console.log(`💸 External transfer: @${sender.username} → ${address} (${amountNum} USDC)`);
+    console.log(`💸 External transfer (passkey verified): @${sender.username} → ${address} (${amountNum} USDC)`);
 
     try {
       const privateKey = sender.wallet.encryptedWalletData;
@@ -400,7 +454,7 @@ export const sendToExternal = async (req: Request, res: Response): Promise<void>
       transfer.transactionHash = result.transactionHash;
       await transfer.save();
 
-      console.log(`✅ Transfer completed: ${result.transactionHash}`);
+      console.log(`✅ Passkey-verified transfer completed: ${result.transactionHash}`);
 
       res.status(200).json({
         success: true,
@@ -412,7 +466,8 @@ export const sendToExternal = async (req: Request, res: Response): Promise<void>
           amount: amountNum,
           transactionHash: result.transactionHash,
           explorerUrl: result.explorerUrl,
-          gasSponsored: result.gasSponsored
+          gasSponsored: result.gasSponsored,
+          verifiedWithPasskey: true
         }
       });
     } catch (txError: any) {
@@ -589,7 +644,7 @@ export const getPaymentLinkDetails = async (req: Request, res: Response): Promis
 };
 
 /**
- * @desc    Claim payment from link (auto-claims after wallet creation)
+ * @desc    Claim payment from link
  * @route   POST /api/transfer/claim/:linkCode
  * @access  Private
  */
@@ -762,6 +817,7 @@ export const getTransferHistory = async (req: Request, res: Response): Promise<v
       message: t.message,
       transactionHash: t.transactionHash,
       linkCode: t.linkCode,
+      verifiedWithPasskey: t.verifiedWithPasskey || false,
       createdAt: t.createdAt,
       claimedAt: t.claimedAt
     }));
@@ -875,5 +931,6 @@ export default {
   claimPaymentLink,
   getPaymentLinkDetails,
   getTransferHistory,
-  cancelPaymentLink
+  cancelPaymentLink,
+  verifyTransactionPasskey
 };

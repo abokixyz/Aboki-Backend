@@ -1,4 +1,13 @@
 // ============= src/services/paymasterService.ts (UPDATED - GASLESS WITH COINBASE PAYMASTER) =============
+/**
+ * Paymaster Service - Gasless Transactions via Smart Account
+ * 
+ * Main function:
+ * - sendUSDCWithPaymaster() - Send USDC with Coinbase sponsorship (gasless)
+ * 
+ * Gas fees are sponsored by Coinbase Paymaster
+ * Uses Safe 1.4.1 Smart Accounts
+ */
 
 import { 
   createPublicClient, 
@@ -18,6 +27,7 @@ import crypto from 'crypto';
 import { NetworkType } from './walletService';
 
 // ============= ENVIRONMENT VARIABLES =============
+
 const WALLET_ENCRYPTION_KEY = process.env.WALLET_ENCRYPTION_KEY || '';
 const COINBASE_PAYMASTER_URL = process.env.COINBASE_PAYMASTER_URL || '';
 
@@ -30,6 +40,7 @@ if (!COINBASE_PAYMASTER_URL) {
 }
 
 // ============= CONFIGURATION =============
+
 const USDC_ADDRESS = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const ENTRYPOINT_ADDRESS_V07 = '0x0000000071727De22E5E9d8BAf0edAc6f37da032';
 
@@ -55,12 +66,18 @@ const USDC_ABI = [
 
 // ============= UTILITY FUNCTIONS =============
 
+/**
+ * Get RPC URL based on network
+ */
 function getRpcUrl(network: NetworkType): string {
   return network === 'base-mainnet'
     ? process.env.BASE_RPC_URL || 'https://mainnet.base.org'
     : process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
 }
 
+/**
+ * Decrypt private key using AES-256-CBC
+ */
 function decryptPrivateKey(encryptedKey: string): string {
   if (!WALLET_ENCRYPTION_KEY) {
     throw new Error('WALLET_ENCRYPTION_KEY not set');
@@ -88,9 +105,20 @@ function decryptPrivateKey(encryptedKey: string): string {
   }
 }
 
+// ============= MAIN FUNCTION =============
+
 /**
- * Send USDC with Coinbase Paymaster (GASLESS)
- * Gas fees are sponsored by Coinbase
+ * @function sendUSDCWithPaymaster
+ * @desc     Send USDC with Coinbase Paymaster (GASLESS)
+ * 
+ * Creates a Safe 1.4.1 Smart Account and sends USDC without paying gas.
+ * Gas fees are sponsored by Coinbase Paymaster.
+ * 
+ * @param    encryptedUserPrivateKey - User's encrypted private key
+ * @param    toAddress - Recipient address
+ * @param    amountUSDC - Amount in USDC (string, e.g., "100")
+ * @param    network - 'base-mainnet' or 'base-sepolia'
+ * @returns  Object with transaction details and gasSponsored flag
  */
 export async function sendUSDCWithPaymaster(
   encryptedUserPrivateKey: string,
@@ -107,6 +135,7 @@ export async function sendUSDCWithPaymaster(
 }> {
   try {
     // ============= VALIDATION =============
+
     if (!encryptedUserPrivateKey || encryptedUserPrivateKey.trim() === '') {
       throw new Error('Encrypted private key is required');
     }
@@ -128,17 +157,20 @@ export async function sendUSDCWithPaymaster(
     console.log(`Network: ${network}`);
 
     // ============= SETUP =============
+
     console.log(`\n📋 STEP 1: Setting up...`);
     const rpcUrl = getRpcUrl(network);
     const chain = network === 'base-mainnet' ? base : baseSepolia;
 
     // ============= DECRYPT KEY =============
+
     console.log(`\n🔐 STEP 2: Decrypting user's private key...`);
     const userPrivateKey = decryptPrivateKey(encryptedUserPrivateKey);
     const signer = privateKeyToAccount(userPrivateKey as `0x${string}`);
     console.log(`   EOA Signer: ${signer.address}`);
 
     // ============= CREATE CLIENTS =============
+
     console.log(`\n🔧 STEP 3: Creating blockchain clients...`);
     const publicClient = createPublicClient({
       chain,
@@ -156,6 +188,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   ✅ Paymaster client configured`);
 
     // ============= CREATE SMART ACCOUNT =============
+
     console.log(`\n🤖 STEP 4: Setting up Smart Account (Safe)...`);
     const safeAccount = await toSafeSmartAccount({
       client: publicClient,
@@ -176,6 +209,7 @@ export async function sendUSDCWithPaymaster(
     }
 
     // ============= CHECK BALANCE =============
+
     console.log(`\n💰 STEP 5: Checking USDC balance...`);
     const amountInWei = parseUnits(amountUSDC, 6);
 
@@ -195,6 +229,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   ✅ Balance check passed`);
 
     // ============= CREATE SMART ACCOUNT CLIENT =============
+
     console.log(`\n🔗 STEP 6: Creating Smart Account Client...`);
     const smartAccountClient = createSmartAccountClient({
       account: safeAccount,
@@ -205,6 +240,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   ✅ Smart Account Client ready`);
 
     // ============= PREPARE TRANSACTION =============
+
     console.log(`\n📝 STEP 7: Preparing USDC transfer...`);
     const txData = encodeFunctionData({
       abi: USDC_ABI,
@@ -214,6 +250,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   ✅ Transaction data encoded`);
 
     // ============= SEND GASLESS TRANSACTION =============
+
     console.log(`\n✍️  STEP 8: Sending gasless transaction...`);
     console.log(`   🎉 Gas sponsored by Coinbase Paymaster!`);
     
@@ -227,6 +264,7 @@ export async function sendUSDCWithPaymaster(
     console.log(`   Hash: ${txHash}`);
 
     // ============= WAIT FOR CONFIRMATION =============
+
     console.log(`\n⏳ STEP 9: Waiting for confirmation...`);
     const receipt = await publicClient.waitForTransactionReceipt({
       hash: txHash as Hex
@@ -236,11 +274,13 @@ export async function sendUSDCWithPaymaster(
     console.log(`   Gas Used: ${receipt.gasUsed} (Sponsored)`);
 
     // ============= GENERATE EXPLORER URL =============
+
     const explorerUrl = network === 'base-mainnet'
       ? `https://basescan.org/tx/${txHash}`
       : `https://sepolia.basescan.org/tx/${txHash}`;
 
     // ============= SUCCESS =============
+
     console.log(`\n${'═'.repeat(70)}`);
     console.log(`✅ GASLESS TRANSFER SUCCESSFUL!`);
     console.log(`${'═'.repeat(70)}`);
@@ -277,6 +317,8 @@ export async function sendUSDCWithPaymaster(
     throw new Error(`Transfer failed: ${error.message}`);
   }
 }
+
+// ============= EXPORTS =============
 
 export default {
   sendUSDCWithPaymaster

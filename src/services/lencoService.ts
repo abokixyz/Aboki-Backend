@@ -1,6 +1,6 @@
 // ============= src/services/lencoService.ts =============
 /**
- * Lenco Service
+ * Lenco Service - FIXED VERSION
  * 
  * Handles all Lenco integrations:
  * - Account verification via /v1/resolve endpoint
@@ -12,7 +12,7 @@
  * API Reference: https://lenco-api.readme.io/
  */
 
-import axios from 'axios';
+import axios, { AxiosInstance } from 'axios';
 
 // ============= TYPE DEFINITIONS =============
 
@@ -78,36 +78,60 @@ interface LencoTransferResponse {
 // ============= LENCO SERVICE CLASS =============
 
 class LencoService {
-  private apiClient: ReturnType<typeof axios.create> | null = null;
+  private apiClient: AxiosInstance | null = null;
   private isConfigured: boolean;
   private baseURL: string;
-  private apiKey: string | undefined;
+  private apiKey: string = '';
 
   constructor() {
-    // Support both LENCO_API_KEY and LENCO_SECRET_KEY for backward compatibility
-    this.baseURL = process.env.LENCO_BASE_URL || 
-                   process.env.LENCO_API_BASE_URL || 
-                   'https://api.lenco.co/access/v1';
-    
-    this.apiKey = (process.env.LENCO_API_KEY || process.env.LENCO_SECRET_KEY || '')
-      .trim()
-      .replace(/^["']|["']$/g, '');
-    
+    // Get API key from environment - support both naming conventions
+    this.apiKey = (
+      process.env.LENCO_API_KEY || 
+      process.env.LENCO_SECRET_KEY || 
+      ''
+    ).trim();
+
+    // Remove quotes if present
+    if (this.apiKey.startsWith('"') || this.apiKey.startsWith("'")) {
+      this.apiKey = this.apiKey.slice(1);
+    }
+    if (this.apiKey.endsWith('"') || this.apiKey.endsWith("'")) {
+      this.apiKey = this.apiKey.slice(0, -1);
+    }
+
+    this.baseURL = (
+      process.env.LENCO_BASE_URL || 
+      process.env.LENCO_API_BASE_URL || 
+      'https://api.lenco.co/access/v1'
+    ).trim();
+
     this.isConfigured = !!this.apiKey;
 
     if (!this.isConfigured) {
       console.warn('⚠️  Lenco API not configured - LENCO_API_KEY or LENCO_SECRET_KEY missing');
       console.warn('⚠️  Lenco service will be unavailable until configured');
     } else {
+      // Initialize axios client with proper configuration
       this.apiClient = axios.create({
         baseURL: this.baseURL,
+        timeout: 15000,
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
           'Accept': 'application/json'
-        },
-        timeout: 15000
+        }
       });
+
+      // Add response interceptor for debugging
+      this.apiClient.interceptors.response.use(
+        (response) => response,
+        (error) => {
+          if (error.response?.status === 401) {
+            console.error('❌ Lenco API Authentication failed (401) - Check your API key');
+          }
+          return Promise.reject(error);
+        }
+      );
 
       console.log('🏦 Lenco service initialized');
       console.log('- Base URL:', this.baseURL);
@@ -143,15 +167,14 @@ class LencoService {
     } catch (error: unknown) {
       console.error('❌ Failed to fetch banks from Lenco:', error);
       
-      if (error instanceof Error && 'response' in error) {
-        const axiosError = error as AxiosErrorLike;
-        if (axiosError.response?.status === 401) {
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 401) {
           throw new Error('Invalid Lenco API key. Please check your LENCO_API_KEY.');
         }
-        if (axiosError.response?.status && axiosError.response.status >= 500) {
+        if (error.response?.status && error.response.status >= 500) {
           throw new Error('Lenco API is temporarily unavailable. Please try again later.');
         }
-        throw new Error(`Lenco API error: ${axiosError.response?.data?.message || axiosError.message}`);
+        throw new Error(`Lenco API error: ${error.response?.data?.message || error.message}`);
       }
       
       if (error instanceof Error) {
@@ -192,16 +215,15 @@ class LencoService {
     } catch (error: unknown) {
       console.error('❌ Account resolution error:', error);
       
-      if (error instanceof Error && 'response' in error) {
-        const axiosError = error as AxiosErrorLike;
-        if (axiosError.response?.status === 400) {
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 400) {
           console.log('❌ Invalid account details provided');
           return null;
         }
-        if (axiosError.response?.status === 401) {
-          throw new Error('Invalid Lenco API key for account resolution.');
+        if (error.response?.status === 401) {
+          throw new Error('Invalid Lenco API key for account resolution. Please verify LENCO_API_KEY.');
         }
-        if (axiosError.response?.status && axiosError.response.status >= 500) {
+        if (error.response?.status && error.response.status >= 500) {
           throw new Error('Lenco account resolution service is temporarily unavailable.');
         }
       }
@@ -259,18 +281,19 @@ class LencoService {
     } catch (error: unknown) {
       console.error('❌ Transfer error:', error);
 
-      if (error instanceof Error && 'response' in error) {
-        const axiosError = error as AxiosErrorLike;
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const message = error.response?.data?.message;
         
-        if (axiosError.response?.status === 400) {
+        if (status === 400) {
           return {
             success: false,
             reference: params.reference,
-            message: axiosError.response?.data?.message || 'Invalid transfer details'
+            message: message || 'Invalid transfer details'
           };
         }
         
-        if (axiosError.response?.status === 401) {
+        if (status === 401) {
           return {
             success: false,
             reference: params.reference,
@@ -278,7 +301,7 @@ class LencoService {
           };
         }
         
-        if (axiosError.response?.status === 403) {
+        if (status === 403) {
           return {
             success: false,
             reference: params.reference,
@@ -286,15 +309,15 @@ class LencoService {
           };
         }
         
-        if (axiosError.response?.status === 422) {
+        if (status === 422) {
           return {
             success: false,
             reference: params.reference,
-            message: axiosError.response?.data?.message || 'Invalid transfer parameters'
+            message: message || 'Invalid transfer parameters'
           };
         }
         
-        if (axiosError.response?.status && axiosError.response.status >= 500) {
+        if (status && status >= 500) {
           return {
             success: false,
             reference: params.reference,
@@ -305,7 +328,7 @@ class LencoService {
         return {
           success: false,
           reference: params.reference,
-          message: axiosError.response?.data?.message || axiosError.message
+          message: message || error.message
         };
       }
 

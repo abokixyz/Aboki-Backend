@@ -155,7 +155,7 @@ router.post(
  *       Start an offramp transaction. Creates a PENDING transaction record.
  *       
  *       Process:
- *       1. Validate amount (10-5000 USDC)
+ *       1. Validate amount (0.1-5000 USDC)
  *       2. Verify bank account with Lenco
  *       3. Calculate NGN amount with fees
  *       4. Create transaction record (PENDING)
@@ -179,7 +179,7 @@ router.post(
  *             properties:
  *               amountUSDC:
  *                 type: number
- *                 minimum: 10
+ *                 minimum: 0.1
  *                 maximum: 5000
  *                 example: 100
  *               accountNumber:

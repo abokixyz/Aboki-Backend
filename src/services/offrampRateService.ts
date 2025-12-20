@@ -1,9 +1,9 @@
-// ============= src/services/offrampRateService.ts (OFFRAMP RATE CALCULATION) =============
+// ============= src/services/offrampRateService.ts (FIXED) =============
 /**
  * Offramp Rate Service
  * 
  * Calculates offramp rates with:
- * - Paycrest base rate (1400 NGN/USDC)
+ * - Paycrest base rate (1400 NGN/USDC fallback)
  * - Offramp markup (+20 NGN)
  * - User fee (1%, capped at $2)
  * - LP fee (0.5%)
@@ -13,12 +13,8 @@ import axios from 'axios';
 
 // ============= CONFIGURATION =============
 
-const PAYCREST_API_BASE_URL = process.env.PAYCREST_API_BASE_URL || 'https://api.paycrest.io';
 const PAYCREST_API_KEY = process.env.PAYCREST_API_KEY || '';
-const PAYCREST_RATE_ENDPOINT = '/v1/rates'; // or '/v1/rates' depending on Paycrest version
-
-// Construct full URL
-const PAYCREST_RATE_URL = `${PAYCREST_API_BASE_URL}${PAYCREST_RATE_ENDPOINT}`;
+const PAYCREST_API_URL = process.env.PAYCREST_API_URL || 'https://api.paycrest.io/v1';
 
 // Offramp constants
 export const MIN_OFFRAMP = 10; // Minimum 10 USDC
@@ -29,9 +25,9 @@ export const FEE_PERCENTAGE = 1; // 1% user fee
 export const FEE_MAX_USD = 2; // Max $2 fee
 export const LP_FEE_PERCENTAGE = 0.5; // 0.5% liquidity provider fee
 
-// Rate caching - always initialized with default fallback
-let cachedRate: number = DEFAULT_FALLBACK_RATE;
-let cacheTime: number = Date.now();
+// Rate caching
+let cachedRate: number | null = null;
+let cacheTime: number = 0;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ============= INTERFACES =============
@@ -72,66 +68,85 @@ export interface OfframpRateResponse {
 // ============= UTILITY FUNCTIONS =============
 
 /**
- * Get current base rate - always returns a number
- */
-function getCurrentBaseRate(): number {
-  // cachedRate is always a number (initialized with DEFAULT_FALLBACK_RATE)
-  return cachedRate;
-}
-
-/**
  * Fetch base rate from Paycrest
+ * FIXED: Use correct endpoint format /rates/USDC/1/NGN
  */
 async function getBaseRateFromPaycrest(): Promise<number> {
   try {
     if (!PAYCREST_API_KEY) {
-      console.warn('⚠️ Paycrest API key not configured, using fallback rate');
+      console.warn('⚠️  PAYCREST_API_KEY not configured');
+      console.warn(`   Set PAYCREST_API_KEY in .env to fetch live rates`);
+      console.warn(`   Using fallback rate: ${DEFAULT_FALLBACK_RATE} NGN/USDC`);
       return DEFAULT_FALLBACK_RATE;
     }
 
-    console.log('📊 Fetching rate from Paycrest...');
+    // FIXED: Use correct endpoint format matching rateService.ts
+    const url = `${PAYCREST_API_URL}/rates/USDC/1/NGN`;
+    
+    console.log('🌐 Fetching rate from Paycrest API...');
+    console.log(`   URL: ${url}`);
 
-    const response = await axios.get(PAYCREST_RATE_URL, {
+    const response = await axios.get(url, {
       headers: {
-        'Authorization': `Bearer ${PAYCREST_API_KEY}`,
-        'Content-Type': 'application/json'
+        'Accept': 'application/json',
+        'x-api-key': PAYCREST_API_KEY
       },
       timeout: 5000
     });
 
-    if (response.data && response.data.data && response.data.data.rate) {
-      const rate = parseFloat(response.data.data.rate);
-      console.log(`✅ Paycrest rate: ${rate} NGN/USDC`);
-      return rate;
+    console.log('   ✅ Paycrest API responded');
+
+    // Handle response format (matching rateService.ts)
+    if (response.data && response.data.status === 'success' && response.data.data) {
+      let parsedRate = typeof response.data.data === 'string' 
+        ? parseFloat(response.data.data) 
+        : (response.data.data.rate || parseFloat(response.data.data));
+        
+      if (isNaN(parsedRate) || parsedRate <= 0) {
+        throw new Error('Invalid rate value from Paycrest');
+      }
+      
+      console.log(`   ✅ Paycrest rate fetched: ${parsedRate} NGN/USDC`);
+      return parsedRate;
     }
 
-    console.warn('⚠️ Invalid Paycrest response, using fallback rate');
+    console.warn('⚠️  Invalid Paycrest response format');
+    console.warn(`   Response: ${JSON.stringify(response.data).slice(0, 100)}`);
+    console.warn(`   Using fallback rate: ${DEFAULT_FALLBACK_RATE} NGN/USDC`);
     return DEFAULT_FALLBACK_RATE;
   } catch (error: any) {
-    console.warn(`⚠️ Error fetching Paycrest rate: ${error.message}`);
+    console.warn(`⚠️  Error fetching Paycrest rate: ${error.message}`);
+    if (error.response) {
+      console.warn(`   Status: ${error.response.status}`);
+      console.warn(`   Data: ${JSON.stringify(error.response.data).slice(0, 100)}`);
+    }
     console.warn(`   Using fallback rate: ${DEFAULT_FALLBACK_RATE} NGN/USDC`);
     return DEFAULT_FALLBACK_RATE;
   }
 }
 
 /**
- * Check if cache is still valid and update if needed
- * Always returns a valid base rate
+ * Get and update base rate
+ * Tries Paycrest first, falls back to cache or default
  */
-async function getAndUpdateBaseRate(): Promise<{ rate: number; isCached: boolean }> {
+async function getAndUpdateBaseRate(): Promise<{ rate: number; isCached: boolean; source: string }> {
   const now = Date.now();
-  
-  // Check if cache expired
-  if (now - cacheTime > CACHE_TTL) {
-    // Cache expired, fetch new rate
-    const freshRate = await getBaseRateFromPaycrest();
-    cachedRate = freshRate;
-    cacheTime = now;
-    return { rate: freshRate, isCached: false };
+
+  // Check if cache is still valid
+  if (cachedRate !== null && (now - cacheTime) <= CACHE_TTL) {
+    console.log(`📦 Using cached rate: ${cachedRate} NGN/USDC (${Math.round((CACHE_TTL - (now - cacheTime)) / 1000)}s remaining)`);
+    return { rate: cachedRate, isCached: true, source: 'cache' };
   }
-  
-  // Cache still valid
-  return { rate: cachedRate, isCached: true };
+
+  // Cache expired or doesn't exist, fetch fresh from Paycrest
+  console.log('📊 Cache expired or missing, fetching fresh rate...');
+  const freshRate = await getBaseRateFromPaycrest();
+
+  // Update cache
+  cachedRate = freshRate;
+  cacheTime = now;
+
+  return { rate: freshRate, isCached: false, source: freshRate === DEFAULT_FALLBACK_RATE ? 'fallback' : 'Paycrest' };
 }
 
 // ============= MAIN RATE FUNCTION =============
@@ -140,11 +155,20 @@ async function getAndUpdateBaseRate(): Promise<{ rate: number; isCached: boolean
  * @function getOfframpRate
  * @desc     Calculate offramp rate with fees
  * 
- * Formula:
- * 1. Base rate from Paycrest (fallback: 1400)
+ * Rate Calculation:
+ * 1. Fetch base rate from Paycrest (or use cache/fallback)
  * 2. Add offramp markup (+20 NGN)
  * 3. Calculate user fee (1%, max $2)
  * 4. Calculate LP fee (0.5%)
+ * 
+ * Example (100 USDC):
+ * - Base Rate: 1400 NGN/USDC
+ * - Offramp Rate: 1420 NGN/USDC (1400 + 20)
+ * - User Fee: 1 USDC (1% of 100)
+ * - Net USDC: 99 USDC
+ * - NGN Amount: 99 × 1420 = ₦140,580
+ * - LP Fee: 0.495 USDC (0.5% of 99)
+ * - Effective Rate: 140,580 / 100 = 1405.80 NGN/USDC
  * 
  * @param    amountUSDC - Amount in USDC (e.g., 100)
  * @returns  OfframpRateResponse with detailed breakdown
@@ -166,50 +190,62 @@ export async function getOfframpRate(amountUSDC: number): Promise<OfframpRateRes
       };
     }
 
-    console.log(`\n📊 Calculating offramp rate for ${amountUSDC} USDC`);
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log(`📊 OFFRAMP RATE CALCULATION`);
+    console.log(`${'═'.repeat(70)}`);
+    console.log(`Amount: ${amountUSDC} USDC\n`);
 
-    // Step 1: Get base rate (guaranteed to be a number)
-    const { rate: baseRate, isCached } = await getAndUpdateBaseRate();
-    
-    if (isCached) {
-      console.log(`📦 Using cached rate: ${baseRate} NGN/USDC`);
-    } else {
-      console.log(`📊 Fetched fresh rate: ${baseRate} NGN/USDC`);
-    }
+    // Step 1: Get base rate
+    console.log(`Step 1️⃣  Fetching base rate...`);
+    const { rate: baseRate, isCached, source } = await getAndUpdateBaseRate();
 
     // Step 2: Add markup
     const offrampRate = baseRate + OFFRAMP_MARKUP;
-    console.log(`📈 Offramp rate (with markup): ${offrampRate} NGN/USDC`);
+    console.log(`\nStep 2️⃣  Adding markup...`);
+    console.log(`   Base Rate: ${baseRate} NGN/USDC (from ${source})`);
+    console.log(`   + Markup: ${OFFRAMP_MARKUP} NGN`);
+    console.log(`   = Offramp Rate: ${offrampRate} NGN/USDC`);
 
     // Step 3: Calculate user fee (1%, capped at $2)
     const feePercentage = FEE_PERCENTAGE / 100;
     const feeUSDC = Math.min(amountUSDC * feePercentage, FEE_MAX_USD);
     const effectiveFeePercent = (feeUSDC / amountUSDC) * 100;
-    const feeNGN = feeUSDC * baseRate; // Fee in NGN at base rate
+    const feeNGN = feeUSDC * baseRate;
 
-    console.log(`💰 User fee: ${feeUSDC.toFixed(6)} USDC (${effectiveFeePercent.toFixed(2)}%)`);
+    console.log(`\nStep 3️⃣  Calculating user fee...`);
+    console.log(`   Fee: ${FEE_PERCENTAGE}% of ${amountUSDC} USDC`);
+    console.log(`   = ${feeUSDC.toFixed(6)} USDC (${effectiveFeePercent.toFixed(2)}%)`);
+    console.log(`   = ₦${feeNGN.toFixed(2)} (at base rate)`);
 
     // Step 4: Calculate net USDC after fee
     const netUSDC = amountUSDC - feeUSDC;
-    console.log(`✅ Net USDC (after fee): ${netUSDC.toFixed(6)} USDC`);
+    console.log(`\nStep 4️⃣  Net USDC after fee...`);
+    console.log(`   ${amountUSDC} USDC - ${feeUSDC.toFixed(6)} USDC`);
+    console.log(`   = ${netUSDC.toFixed(6)} USDC`);
 
     // Step 5: Calculate NGN amount
     const ngnAmount = netUSDC * offrampRate;
-    console.log(`💵 NGN amount: ₦${ngnAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`);
+    console.log(`\nStep 5️⃣  Converting to NGN...`);
+    console.log(`   ${netUSDC.toFixed(6)} USDC × ${offrampRate} NGN/USDC`);
+    console.log(`   = ₦${ngnAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`);
 
     // Step 6: Calculate LP fee (0.5% of net USDC)
     const lpFeeUSDC = netUSDC * (LP_FEE_PERCENTAGE / 100);
-    console.log(`🏦 LP fee: ${lpFeeUSDC.toFixed(6)} USDC`);
+    console.log(`\nStep 6️⃣  Calculating LP fee...`);
+    console.log(`   ${LP_FEE_PERCENTAGE}% of ${netUSDC.toFixed(6)} USDC`);
+    console.log(`   = ${lpFeeUSDC.toFixed(6)} USDC (to admin wallet)`);
 
     // Step 7: Calculate effective rate
     const effectiveRate = ngnAmount / amountUSDC;
-    console.log(`📊 Effective rate: ${effectiveRate.toFixed(2)} NGN/USDC`);
+    console.log(`\nStep 7️⃣  Effective rate (all-in)...`);
+    console.log(`   ₦${ngnAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })} / ${amountUSDC} USDC`);
+    console.log(`   = ${effectiveRate.toFixed(2)} NGN/USDC`);
 
     const timestamp = new Date().toISOString();
 
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log(`✅ RATE CALCULATION COMPLETE`);
-    console.log(`${'═'.repeat(60)}`);
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log(`✅ CALCULATION COMPLETE`);
+    console.log(`${'═'.repeat(70)}\n`);
 
     return {
       success: true,
@@ -233,7 +269,7 @@ export async function getOfframpRate(amountUSDC: number): Promise<OfframpRateRes
           lpFeeUSDC,
           breakdown: `${amountUSDC} USDC - ${feeUSDC.toFixed(6)} USDC fee = ${netUSDC.toFixed(6)} USDC net = ₦${ngnAmount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
         },
-        source: isCached ? 'cache' : 'Paycrest',
+        source: source,
         cached: isCached,
         timestamp
       }
@@ -263,25 +299,21 @@ export async function getOfframpRateByNGN(amountNGN: number): Promise<OfframpRat
       };
     }
 
-    console.log(`\n📊 Calculating USDC amount for ₦${amountNGN.toLocaleString()}`);
+    console.log(`\n📊 Reverse calculation: ₦${amountNGN.toLocaleString()} → USDC`);
 
-    // Get base rate (guaranteed to be a number)
+    // Get base rate
     const { rate: baseRate } = await getAndUpdateBaseRate();
     const offrampRate = baseRate + OFFRAMP_MARKUP;
 
-    // Reverse calculation: NGN / offrampRate = net USDC
+    // Reverse: NGN / offrampRate = net USDC
     const netUSDC = amountNGN / offrampRate;
 
     // Account for fee: netUSDC = amountUSDC - fee
-    // fee = amountUSDC * FEE_PERCENTAGE or max FEE_MAX_USD
-    // Solve for amountUSDC
     let amountUSDC: number;
 
     if (netUSDC * (FEE_PERCENTAGE / 100) > FEE_MAX_USD) {
-      // Fee is capped at $2
       amountUSDC = netUSDC + FEE_MAX_USD;
     } else {
-      // Fee is percentage
       amountUSDC = netUSDC / (1 - FEE_PERCENTAGE / 100);
     }
 
@@ -293,9 +325,6 @@ export async function getOfframpRateByNGN(amountNGN: number): Promise<OfframpRat
       };
     }
 
-    console.log(`✅ USDC amount: ${amountUSDC.toFixed(6)} USDC`);
-
-    // Get full rate breakdown for this USDC amount
     return getOfframpRate(amountUSDC);
   } catch (error: any) {
     console.error('❌ Error calculating by NGN:', error.message);
@@ -325,7 +354,6 @@ export async function getRateInfo(): Promise<{
   error?: string;
 }> {
   try {
-    // Get base rate (guaranteed to be a number)
     const { rate: baseRate } = await getAndUpdateBaseRate();
 
     return {
@@ -363,12 +391,34 @@ export function setManualRate(rate: number): void {
 
 /**
  * @function clearRateCache
- * @desc     Clear rate cache and fetch fresh from Paycrest
+ * @desc     Clear rate cache and fetch fresh from Paycrest on next call
  */
 export function clearRateCache(): void {
-  cachedRate = DEFAULT_FALLBACK_RATE;
+  cachedRate = null;
   cacheTime = 0;
-  console.log('✅ Rate cache cleared');
+  console.log('✅ Rate cache cleared - will fetch fresh on next call');
+}
+
+/**
+ * @function getCacheStatus
+ * @desc     Get cache status information
+ */
+export function getCacheStatus(): {
+  isCached: boolean;
+  cachedRate: number | null;
+  cacheAge: number;
+  cacheExpiry: number;
+} {
+  const now = Date.now();
+  const cacheAge = cacheTime > 0 ? now - cacheTime : 0;
+  const cacheExpiry = Math.max(0, CACHE_TTL - cacheAge);
+
+  return {
+    isCached: cachedRate !== null && cacheAge <= CACHE_TTL,
+    cachedRate,
+    cacheAge,
+    cacheExpiry
+  };
 }
 
 // ============= EXPORTS =============
@@ -379,6 +429,7 @@ export default {
   getRateInfo,
   setManualRate,
   clearRateCache,
+  getCacheStatus,
   MIN_OFFRAMP,
   MAX_OFFRAMP,
   DEFAULT_FALLBACK_RATE,

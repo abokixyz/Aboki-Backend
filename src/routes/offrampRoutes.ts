@@ -5,8 +5,10 @@
  * All USDC → NGN offramp endpoints
  * 
  * Public Endpoints:
+ * - GET / - Offramp endpoint info
  * - GET /rate - Get current rate (public)
  * - POST /webhook/lenco - Lenco webhook confirmation (signed)
+ * - POST /verify-account - Verify bank account
  * 
  * Protected Endpoints (require JWT):
  * - POST /initiate - Start offramp
@@ -15,70 +17,53 @@
  * - GET /history - Get user's transaction history
  * - POST /beneficiaries - Add/manage beneficiaries
  * - GET /frequent-accounts - Get frequently used accounts
- * 
- * Example Usage:
- * 
- * 1. Get Rate:
- *    GET /api/offramp/rate?amountUSDC=100
- * 
- * 2. Initiate Offramp:
- *    POST /api/offramp/initiate
- *    {
- *      "amountUSDC": 100,
- *      "beneficiary": {
- *        "name": "John Doe",
- *        "accountNumber": "1234567890",
- *        "bankCode": "011"
- *      }
- *    }
- * 
- * 3. Confirm Transaction (after user signs with Smart Account):
- *    POST /api/offramp/confirm-transfer
- *    {
- *      "transactionReference": "ABOKI_OFFRAMP_...",
- *      "txHash": "0x..."
- *    }
- * 
- * 4. Get Status:
- *    GET /api/offramp/status/ABOKI_OFFRAMP_...
- * 
- * 5. Get History:
- *    GET /api/offramp/history?limit=10&skip=0
  */
 
-import express, { Router, Request, Response, NextFunction } from 'express';
+import { Router, Request, Response } from 'express';
 
-// Middleware
+// Middleware - Import from correct paths (middlewares folder)
 import { authMiddleware } from '../middleware/auth';
 import { validateRequest } from '../middleware/validation';
-import { 
-    getRateLimiter,
-    webhookLimiter,
-    initiateOfframpLimiter,
-    confirmTransferLimiter,
-    statusLimiter,
-    historyLimiter,
-    beneficiaryLimiter
-  } from '../middleware/rateLimiter'
+import rateLimitMiddleware from '../middleware/rateLimiter';
 
 // Controllers
-import {
-  getRate,
-  initiateOfframp,
-  confirmTransfer,
-  getStatus,
-  getHistory,
-  handleLencoWebhook,
-  addBeneficiary,
-  getBeneficiaries,
-  deleteBeneficiary,
-  setDefaultBeneficiary,
-  getFrequentAccounts
-} from '../controllers/offrampController';
+import offrampController from '../controllers/offrampController';
 
 // ============= ROUTER SETUP =============
 
 const router = Router();
+
+// ============= ROOT ENDPOINT =============
+
+/**
+ * @route    GET /api/offramp
+ * @access   Public
+ * @desc     Offramp endpoint info and available routes
+ */
+router.get('/', (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    message: 'Offramp API is running',
+    version: '1.0.0',
+    endpoints: {
+      rate: 'GET /api/offramp/rate',
+      verifyAccount: 'POST /api/offramp/verify-account',
+      initiate: 'POST /api/offramp/initiate',
+      confirmTransfer: 'POST /api/offramp/confirm-transfer',
+      status: 'GET /api/offramp/status/:reference',
+      history: 'GET /api/offramp/history',
+      beneficiaries: {
+        add: 'POST /api/offramp/beneficiaries',
+        list: 'GET /api/offramp/beneficiaries',
+        delete: 'DELETE /api/offramp/beneficiaries/:id',
+        setDefault: 'PUT /api/offramp/beneficiaries/:id/default'
+      },
+      frequentAccounts: 'GET /api/offramp/frequent-accounts',
+      webhook: 'POST /api/offramp/webhook/lenco'
+    },
+    documentation: '/api-docs'
+  });
+});
 
 // ============= PUBLIC ENDPOINTS =============
 
@@ -88,61 +73,129 @@ const router = Router();
  * @access   Public
  * @desc     Get current offramp rate (detailed breakdown)
  * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "baseRate": 1400,
- *     "offrampRate": 1420,
- *     "markup": 20,
- *     "fee": {
- *       "percentage": 1,
- *       "amountUSDC": 1,
- *       "amountNGN": 1400,
- *       "maxFeeUSD": 2,
- *       "effectiveFeePercent": 1
- *     },
- *     "calculation": {
- *       "amountUSDC": 100,
- *       "feeUSDC": 1,
- *       "netUSDC": 99,
- *       "ngnAmount": 140580,
- *       "effectiveRate": 1405.80,
- *       "lpFeeUSDC": 0.5,
- *       "breakdown": "100 USDC - 1 USDC fee = 99 USDC net = ₦140,580"
- *     },
- *     "source": "Paycrest",
- *     "cached": false,
- *     "timestamp": "2025-12-19T14:07:32.701Z"
- *   }
- * }
+ * @swagger
+ * /api/offramp/rate:
+ *   get:
+ *     summary: Get current offramp rate
+ *     description: |
+ *       Get the current USDC/NGN exchange rate with fee breakdown.
+ *       
+ *       Rate Calculation:
+ *       - Base Rate: From Paycrest (fallback: 1400)
+ *       - Offramp Rate: Base Rate + ₦20 markup
+ *       - Fee: 1% of USDC (capped at $2) - DEDUCTED from amount
+ *       - LP Fee: 0.5% of net USDC
+ *       
+ *       Example: 100 USDC offramp
+ *       - Base Rate: 1400 NGN/USDC
+ *       - Offramp Rate: 1420 NGN/USDC (1400 + 20 markup)
+ *       - Fee: 1 USDC (1% of 100, not capped)
+ *       - Net USDC: 99 USDC
+ *       - NGN Amount: 99 × 1420 = 140,580 NGN
+ *       - LP Fee: 0.495 USDC (0.5% of 99)
+ *     tags: [Offramp]
+ *     parameters:
+ *       - in: query
+ *         name: amountUSDC
+ *         schema:
+ *           type: number
+ *         description: Amount in USDC
+ *         example: 100
+ *     responses:
+ *       200:
+ *         description: Rate retrieved successfully
  */
 router.get(
   '/rate',
-  getRateLimiter,
-  getRate
+  rateLimitMiddleware,
+  offrampController.getRate
+);
+
+/**
+ * @route    POST /api/offramp/verify-account
+ * @access   Public
+ * @desc     Verify bank account details before initiating offramp
+ * 
+ * @swagger
+ * /api/offramp/verify-account:
+ *   post:
+ *     summary: Verify bank account
+ *     description: |
+ *       Verify a Nigerian bank account before initiating an offramp transaction.
+ *       Returns the verified account name if successful.
+ *       
+ *       This should be called BEFORE /initiate to ensure the account is valid.
+ *     tags: [Offramp]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - accountNumber
+ *               - bankCode
+ *             properties:
+ *               accountNumber:
+ *                 type: string
+ *                 example: "1234567890"
+ *                 description: 10-digit Nigerian bank account number
+ *               bankCode:
+ *                 type: string
+ *                 example: "011"
+ *                 description: Nigerian bank code (e.g., 011 for First Bank)
+ *     responses:
+ *       200:
+ *         description: Account verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     accountName:
+ *                       type: string
+ *                       example: "John Doe"
+ *                     accountNumber:
+ *                       type: string
+ *                       example: "1234567890"
+ *                     bankCode:
+ *                       type: string
+ *                       example: "011"
+ *                     bankName:
+ *                       type: string
+ *                       example: "First Bank of Nigeria"
+ *       400:
+ *         description: Invalid account details or verification failed
+ *       429:
+ *         description: Rate limit exceeded
+ */
+router.post(
+  '/verify-account',
+  rateLimitMiddleware,
+  validateRequest({
+    body: {
+      accountNumber: { type: 'string', required: true },
+      bankCode: { type: 'string', required: true }
+    }
+  }),
+  offrampController.verifyAccount
 );
 
 /**
  * @route    POST /api/offramp/webhook/lenco
- * @access   Public (but signature verified)
+ * @access   Public (signature verified if secret available)
  * @desc     Webhook endpoint for Lenco settlement confirmation
- * 
- * Body:
- * {
- *   "event": "transfer.completed",
- *   "data": {
- *     "reference": "LENCO_...",
- *     "amount": 140580,
- *     "status": "completed"
- *   },
- *   "signature": "..."
- * }
  */
 router.post(
   '/webhook/lenco',
-  webhookLimiter,
-  handleLencoWebhook
+  rateLimitMiddleware,
+  offrampController.handleLencoWebhook
 );
 
 // ============= PROTECTED ENDPOINTS =============
@@ -152,36 +205,67 @@ router.post(
  * @access   Private (requires JWT)
  * @desc     Initiate USDC → NGN offramp
  * 
- * Body:
- * {
- *   "amountUSDC": 100,
- *   "beneficiary": {
- *     "name": "John Doe",
- *     "accountNumber": "1234567890",
- *     "bankCode": "011"
- *   }
- * }
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "transactionReference": "ABOKI_OFFRAMP_...",
- *     "status": "PENDING",
- *     "amountUSDC": 100,
- *     "amountNGN": 140580,
- *     "userAddress": "0x...",
- *     "beneficiary": {
- *       "name": "John Doe",
- *       "bankCode": "011"
- *     }
- *   }
- * }
+ * @swagger
+ * /api/offramp/initiate:
+ *   post:
+ *     summary: Initiate offramp transaction
+ *     description: |
+ *       Start a USDC to NGN offramp transaction.
+ *       
+ *       Process Flow:
+ *       1. Validate amount (10-5000 USDC)
+ *       2. Verify bank account with Lenco
+ *       3. Calculate NGN amount with fees
+ *       4. Create transaction record
+ *       5. Return transaction reference for signing
+ *       
+ *       User must sign with Smart Account to confirm transfer.
+ *       
+ *       Limits:
+ *       - Minimum: 10 USDC
+ *       - Maximum: 5000 USDC per transaction
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amountUSDC
+ *               - beneficiary
+ *             properties:
+ *               amountUSDC:
+ *                 type: number
+ *                 minimum: 10
+ *                 maximum: 5000
+ *                 example: 100
+ *               beneficiary:
+ *                 type: object
+ *                 required:
+ *                   - name
+ *                   - accountNumber
+ *                   - bankCode
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                     example: "John Doe"
+ *                   accountNumber:
+ *                     type: string
+ *                     example: "1234567890"
+ *                   bankCode:
+ *                     type: string
+ *                     example: "011"
+ *     responses:
+ *       200:
+ *         description: Offramp initiated successfully
  */
 router.post(
   '/initiate',
   authMiddleware,
-  initiateOfframpLimiter,
+  rateLimitMiddleware,
   validateRequest({
     body: {
       amountUSDC: { type: 'number', required: true, min: 10, max: 5000 },
@@ -196,107 +280,49 @@ router.post(
       }
     }
   }),
-  initiateOfframp
+  offrampController.initiateOfframp
 );
 
 /**
  * @route    POST /api/offramp/confirm-transfer
  * @access   Private (requires JWT)
- * @desc     Confirm blockchain transaction (user's Smart Account sent USDC)
- * 
- * Body:
- * {
- *   "transactionReference": "ABOKI_OFFRAMP_...",
- *   "txHash": "0x..."
- * }
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "status": "PROCESSING",
- *     "message": "Transfer confirmed, settling with Lenco",
- *     "lencoReference": "LENCO_..."
- *   }
- * }
+ * @desc     Confirm blockchain transaction
  */
 router.post(
   '/confirm-transfer',
   authMiddleware,
-  confirmTransferLimiter,
+  rateLimitMiddleware,
   validateRequest({
     body: {
       transactionReference: { type: 'string', required: true },
       txHash: { type: 'string', required: true }
     }
   }),
-  confirmTransfer
+  offrampController.confirmTransfer
 );
 
 /**
  * @route    GET /api/offramp/status/:reference
  * @access   Private (requires JWT)
  * @desc     Get offramp transaction status
- * 
- * Params:
- * - reference: ABOKI_OFFRAMP_... (transaction reference)
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "transactionReference": "ABOKI_OFFRAMP_...",
- *     "status": "SETTLING",
- *     "amountUSDC": 100,
- *     "amountNGN": 140580,
- *     "beneficiary": "John Doe",
- *     "createdAt": "2025-12-19T...",
- *     "completedAt": null
- *   }
- * }
  */
 router.get(
   '/status/:reference',
   authMiddleware,
-  statusLimiter,
-  getStatus
+  rateLimitMiddleware,
+  offrampController.getStatus
 );
 
 /**
  * @route    GET /api/offramp/history
  * @access   Private (requires JWT)
  * @desc     Get user's offramp transaction history
- * 
- * Query:
- * - limit: number (default: 10, max: 50)
- * - skip: number (default: 0)
- * - status: PENDING|PROCESSING|SETTLING|COMPLETED|FAILED (optional)
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": [
- *     {
- *       "reference": "ABOKI_OFFRAMP_...",
- *       "status": "COMPLETED",
- *       "amountUSDC": 100,
- *       "amountNGN": 140580,
- *       "beneficiary": "John Doe",
- *       "createdAt": "2025-12-19T..."
- *     }
- *   ],
- *   "pagination": {
- *     "total": 25,
- *     "limit": 10,
- *     "skip": 0
- *   }
- * }
  */
 router.get(
   '/history',
   authMiddleware,
-  historyLimiter,
-  getHistory
+  rateLimitMiddleware,
+  offrampController.getHistory
 );
 
 // ============= BENEFICIARY ENDPOINTS =============
@@ -305,31 +331,11 @@ router.get(
  * @route    POST /api/offramp/beneficiaries
  * @access   Private (requires JWT)
  * @desc     Add new beneficiary
- * 
- * Body:
- * {
- *   "name": "John Doe",
- *   "accountNumber": "1234567890",
- *   "bankCode": "011"
- * }
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "id": "507f1f77bcf86cd799439011",
- *     "name": "John Doe",
- *     "accountNumber": "1234567890",
- *     "bankCode": "011",
- *     "isVerified": false,
- *     "verificationStatus": "PENDING"
- *   }
- * }
  */
 router.post(
   '/beneficiaries',
   authMiddleware,
-  beneficiaryLimiter,
+  rateLimitMiddleware,
   validateRequest({
     body: {
       name: { type: 'string', required: true },
@@ -337,76 +343,43 @@ router.post(
       bankCode: { type: 'string', required: true }
     }
   }),
-  addBeneficiary
+  offrampController.addBeneficiary
 );
 
 /**
  * @route    GET /api/offramp/beneficiaries
  * @access   Private (requires JWT)
  * @desc     Get all user's beneficiaries
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": [
- *     {
- *       "id": "507f1f77bcf86cd799439011",
- *       "name": "John Doe",
- *       "accountNumber": "1234567890",
- *       "bankCode": "011",
- *       "bankName": "First Bank",
- *       "isVerified": true,
- *       "isDefault": true,
- *       "usageCount": 5,
- *       "lastUsedAt": "2025-12-19T..."
- *     }
- *   ]
- * }
  */
 router.get(
   '/beneficiaries',
   authMiddleware,
-  beneficiaryLimiter,
-  getBeneficiaries
+  rateLimitMiddleware,
+  offrampController.getBeneficiaries
 );
 
 /**
  * @route    DELETE /api/offramp/beneficiaries/:id
  * @access   Private (requires JWT)
  * @desc     Delete beneficiary (soft delete)
- * 
- * Response:
- * {
- *   "success": true,
- *   "message": "Beneficiary deleted"
- * }
  */
 router.delete(
   '/beneficiaries/:id',
   authMiddleware,
-  beneficiaryLimiter,
-  deleteBeneficiary
+  rateLimitMiddleware,
+  offrampController.deleteBeneficiary
 );
 
 /**
  * @route    PUT /api/offramp/beneficiaries/:id/default
  * @access   Private (requires JWT)
  * @desc     Set beneficiary as default
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": {
- *     "id": "507f1f77bcf86cd799439011",
- *     "isDefault": true
- *   }
- * }
  */
 router.put(
   '/beneficiaries/:id/default',
   authMiddleware,
-  beneficiaryLimiter,
-  setDefaultBeneficiary
+  rateLimitMiddleware,
+  offrampController.setDefaultBeneficiary
 );
 
 // ============= FREQUENT ACCOUNTS ENDPOINTS =============
@@ -415,33 +388,12 @@ router.put(
  * @route    GET /api/offramp/frequent-accounts
  * @access   Private (requires JWT)
  * @desc     Get frequently used bank accounts
- * 
- * Query:
- * - type: 'top' | 'recent' (default: 'top')
- * - limit: number (default: 5, max: 20)
- * 
- * Response:
- * {
- *   "success": true,
- *   "data": [
- *     {
- *       "id": "507f1f77bcf86cd799439011",
- *       "name": "John's Account",
- *       "accountNumber": "1234567890",
- *       "bankCode": "011",
- *       "bankName": "First Bank",
- *       "usageCount": 15,
- *       "totalAmountSent": 1500,
- *       "lastUsedAt": "2025-12-19T..."
- *     }
- *   ]
- * }
  */
 router.get(
   '/frequent-accounts',
   authMiddleware,
-  historyLimiter,
-  getFrequentAccounts
+  rateLimitMiddleware,
+  offrampController.getFrequentAccounts
 );
 
 // ============= ERROR HANDLING =============
@@ -452,66 +404,25 @@ router.get(
 router.use((req: Request, res: Response) => {
   res.status(404).json({
     success: false,
-    error: `Offramp endpoint not found: ${req.method} ${req.path}`
+    error: `Offramp endpoint not found: ${req.method} ${req.path}`,
+    availableEndpoints: [
+      'GET /',
+      'GET /rate',
+      'POST /verify-account',
+      'POST /webhook/lenco',
+      'POST /initiate',
+      'POST /confirm-transfer',
+      'GET /status/:reference',
+      'GET /history',
+      'POST /beneficiaries',
+      'GET /beneficiaries',
+      'DELETE /beneficiaries/:id',
+      'PUT /beneficiaries/:id/default',
+      'GET /frequent-accounts'
+    ]
   });
 });
 
 // ============= EXPORTS =============
 
 export default router;
-
-/**
- * INTEGRATION EXAMPLE:
- * 
- * In your main app.ts:
- * 
- * import offrampRoutes from './routes/offrampRoutes';
- * 
- * app.use('/api/offramp', offrampRoutes);
- * 
- * This mounts all routes at /api/offramp with 11 endpoints:
- * 1. GET /rate
- * 2. POST /webhook/lenco
- * 3. POST /initiate
- * 4. POST /confirm-transfer
- * 5. GET /status/:reference
- * 6. GET /history
- * 7. POST /beneficiaries
- * 8. GET /beneficiaries
- * 9. DELETE /beneficiaries/:id
- * 10. PUT /beneficiaries/:id/default
- * 11. GET /frequent-accounts
- */
-
-/**
- * RATE LIMITS (per minute):
- * - GET /rate: 100 (public)
- * - POST /webhook/lenco: 1000 (webhooks)
- * - POST /initiate: 20 (per user)
- * - POST /confirm-transfer: 30 (per user)
- * - GET /status: 100 (per user)
- * - GET /history: 50 (per user)
- * - POST /beneficiaries: 20 (per user)
- * - GET /beneficiaries: 50 (per user)
- * - DELETE /beneficiaries: 20 (per user)
- * - PUT /beneficiaries/default: 20 (per user)
- * - GET /frequent-accounts: 50 (per user)
- */
-
-/**
- * RESPONSE PATTERN:
- * 
- * Success:
- * {
- *   "success": true,
- *   "data": { ... },
- *   "message": "Optional success message"
- * }
- * 
- * Error:
- * {
- *   "success": false,
- *   "error": "Error message",
- *   "code": "ERROR_CODE" (optional)
- * }
- */

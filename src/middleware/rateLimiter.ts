@@ -1,42 +1,72 @@
-// ============= src/middleware/rateLimit.ts =============
+// ============= src/middlewares/rateLimitMiddleware.ts =============
 /**
  * Rate Limiting Middleware
  * 
- * Prevents spam and abuse with configurable per-endpoint limits
+ * General purpose rate limiter for API endpoints
+ * Can be customized per route as needed
+ * 
+ * Handles IPv6 addresses properly
  */
 
-import rateLimitLib, { RateLimitRequestHandler } from 'express-rate-limit';
+import rateLimit, { RateLimitRequestHandler } from 'express-rate-limit';
+import { Request } from 'express';
 
-// ============= GLOBAL RATE LIMITERS =============
+// ============= HELPER FUNCTION =============
 
 /**
- * @limiter onrampLimiter
- * @desc    For onramp payment initiation (high-value operations)
- * @limit   5 requests per 15 minutes per IP
+ * Get safe key for rate limiter (handles IPv6 properly)
+ * Prevents "ERR_ERL_KEY_GEN_IPV6" error
  */
-export const onrampLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per 15 minutes per IP
-  message: {
-    success: false,
-    error: 'Too many onramp attempts. Please try again in 15 minutes.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true, // Return rate limit info in RateLimit-* headers
-  legacyHeaders: false, // Disable X-RateLimit-* headers
-  skip: (req) => req.path.includes('/webhook'),
-  keyGenerator: (req) => {
-    // Use user ID if authenticated, otherwise use IP
-    return (req as any).user?.id || req.ip || 'unknown';
+function getSafeKey(req: Request): string {
+  // Prefer user ID if authenticated
+  if ((req as any).user?.id) {
+    return (req as any).user.id;
   }
-});
+  
+  // Get IP address - try multiple sources
+  let ip: string | undefined;
+  
+  // Try req.ip first (most reliable)
+  if (req.ip) {
+    ip = req.ip;
+  }
+  // Try connection.remoteAddress
+  else if ((req.connection as any)?.remoteAddress) {
+    ip = (req.connection as any).remoteAddress;
+  }
+  // Try socket.remoteAddress
+  else if ((req.socket as any)?.remoteAddress) {
+    ip = (req.socket as any).remoteAddress;
+  }
+  // Fallback
+  else {
+    ip = 'unknown';
+  }
+  
+  // Handle IPv6 addresses
+  if (ip && typeof ip === 'string') {
+    // Remove IPv4 mapped prefix (::ffff:192.0.2.1 -> 192.0.2.1)
+    ip = ip.replace(/^::ffff:/, '');
+    
+    // Remove IPv6 scope ID (%eth0)
+    ip = ip.split('%')[0];
+    
+    // If still IPv6 (contains colons), convert to safe format
+    if (ip.includes(':')) {
+      // Replace colons and truncate to 20 chars for key safety
+      return `ipv6_${ip.replace(/:/g, '_').slice(0, 20)}`;
+    }
+  }
+  
+  return ip || 'unknown';
+}
+
+// ============= DEFAULT RATE LIMITER =============
 
 /**
- * @limiter apiLimiter
- * @desc    General rate limiter for standard API endpoints
- * @limit   30 requests per 1 minute per user/IP
+ * Default rate limiter - 30 requests per minute per user/IP
  */
-export const apiLimiter: RateLimitRequestHandler = rateLimitLib({
+const rateLimitMiddleware: RateLimitRequestHandler = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
   max: 30, // 30 requests per minute
   message: {
@@ -44,39 +74,18 @@ export const apiLimiter: RateLimitRequestHandler = rateLimitLib({
     error: 'Too many requests. Please slow down.',
     code: 'RATE_LIMIT_EXCEEDED'
   },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
+  standardHeaders: true, // Return rate limit info in RateLimit-* headers
+  legacyHeaders: false, // Disable X-RateLimit-* headers
+  keyGenerator: (req) => getSafeKey(req as Request)
 });
 
-/**
- * @limiter authLimiter
- * @desc    Strict rate limiter for authentication endpoints
- * @limit   10 requests per 15 minutes per IP
- */
-export const authLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // 10 attempts per 15 minutes
-  message: {
-    success: false,
-    error: 'Too many authentication attempts. Please try again later.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.ip || 'unknown'
-});
-
-// ============= OFFRAMP-SPECIFIC RATE LIMITERS =============
+// ============= SPECIFIC RATE LIMITERS =============
 
 /**
- * @limiter getRateLimiter
- * @desc    For GET /api/offramp/rate endpoint
- * @limit   100 requests per 1 minute (public endpoint)
+ * Rate limiter for public endpoints
+ * 100 requests per minute per IP
  */
-export const getRateLimiter: RateLimitRequestHandler = rateLimitLib({
+export const publicLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
   max: 100, // 100 requests per minute
   message: {
@@ -86,75 +95,16 @@ export const getRateLimiter: RateLimitRequestHandler = rateLimitLib({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip || 'unknown'
+  keyGenerator: (req) => getSafeKey(req as Request)
 });
 
 /**
- * @limiter initiateOfframpLimiter
- * @desc    For POST /api/offramp/initiate
- * @limit   20 requests per 1 minute per user
+ * Strict rate limiter for high-value operations (offramp, onramp)
+ * 20 requests per minute per user
  */
-export const initiateOfframpLimiter: RateLimitRequestHandler = rateLimitLib({
+export const strictLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 20, // 20 per minute per user
-  message: {
-    success: false,
-    error: 'Too many offramp initiation attempts. Please slow down.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
-});
-
-/**
- * @limiter confirmTransferLimiter
- * @desc    For POST /api/offramp/confirm-transfer
- * @limit   30 requests per 1 minute per user
- */
-export const confirmTransferLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 30, // 30 per minute per user
-  message: {
-    success: false,
-    error: 'Too many transfer confirmations. Please slow down.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
-});
-
-/**
- * @limiter webhookLimiter
- * @desc    For POST /api/offramp/webhook/lenco
- * @limit   1000 requests per 1 minute (webhooks can retry)
- */
-export const webhookLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 1000, // 1000 per minute (webhooks may retry)
-  message: {
-    success: false,
-    error: 'Rate limit exceeded.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.ip || 'unknown'
-});
-
-/**
- * @limiter beneficiaryLimiter
- * @desc    For beneficiary endpoints
- * @limit   20 requests per 1 minute per user
- */
-export const beneficiaryLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 20, // 20 per minute per user
+  max: 20, // 20 requests per minute per user
   message: {
     success: false,
     error: 'Too many requests. Please slow down.',
@@ -162,19 +112,16 @@ export const beneficiaryLimiter: RateLimitRequestHandler = rateLimitLib({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
+  keyGenerator: (req) => getSafeKey(req as Request)
 });
 
 /**
- * @limiter historyLimiter
- * @desc    For GET /api/offramp/history
- * @limit   50 requests per 1 minute per user
+ * Webhook rate limiter
+ * 1000 requests per minute (webhooks may retry)
  */
-export const historyLimiter: RateLimitRequestHandler = rateLimitLib({
+export const webhookLimiter: RateLimitRequestHandler = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 50, // 50 per minute per user
+  max: 1000, // 1000 per minute
   message: {
     success: false,
     error: 'Rate limit exceeded.',
@@ -182,52 +129,19 @@ export const historyLimiter: RateLimitRequestHandler = rateLimitLib({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
+  keyGenerator: (req) => getSafeKey(req as Request)
 });
 
 /**
- * @limiter statusLimiter
- * @desc    For GET /api/offramp/status/:reference
- * @limit   100 requests per 1 minute per user
- */
-export const statusLimiter: RateLimitRequestHandler = rateLimitLib({
-  windowMs: 1 * 60 * 1000, // 1 minute
-  max: 100, // 100 per minute per user
-  message: {
-    success: false,
-    error: 'Rate limit exceeded.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    return (req as any).user?.id || req.ip || 'unknown';
-  }
-});
-
-/**
- * @function createRateLimiter
- * @desc     Factory function to create custom rate limiters
- * 
- * @param    options: { windowMs, max, message?, keyGenerator? }
- * @return   RateLimitRequestHandler
- * 
- * Usage:
- * const customLimiter = createRateLimiter({
- *   windowMs: 60000,
- *   max: 50,
- *   message: 'Custom rate limit message'
- * });
+ * Create custom rate limiter
+ * @param options - Configuration options
  */
 export function createRateLimiter(options: {
   windowMs: number;
   max: number;
   message?: string;
-  keyGenerator?: (req: any) => string;
 }): RateLimitRequestHandler {
-  return rateLimitLib({
+  return rateLimit({
     windowMs: options.windowMs,
     max: options.max,
     message: {
@@ -237,22 +151,10 @@ export function createRateLimiter(options: {
     },
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: options.keyGenerator || ((req) => req.ip || 'unknown')
+    keyGenerator: (req) => getSafeKey(req as Request)
   });
 }
 
 // ============= EXPORTS =============
 
-export default {
-  onrampLimiter,
-  apiLimiter,
-  authLimiter,
-  getRateLimiter,
-  initiateOfframpLimiter,
-  confirmTransferLimiter,
-  webhookLimiter,
-  beneficiaryLimiter,
-  historyLimiter,
-  statusLimiter,
-  createRateLimiter
-};
+export default rateLimitMiddleware;

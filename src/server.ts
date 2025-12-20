@@ -3,7 +3,7 @@
  * Express Server Configuration
  * 
  * Main entry point for the API
- * Configures middleware, routes, and error handling
+ * Configures middleware, routes, error handling, and services
  */
 
 import express, { Application, Request, Response, NextFunction } from 'express';
@@ -12,6 +12,7 @@ import cors from 'cors';
 import connectDB from './config/database';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
+import { startPollingService } from './services/lencoPollingService';
 
 // Load environment variables
 dotenv.config();
@@ -53,6 +54,12 @@ app.use(express.urlencoded({ extended: true }));
 // Connect to MongoDB
 connectDB();
 
+// ============= SERVICES =============
+
+// Start Lenco polling service for offramp transaction status updates
+// This polls Lenco API for pending/settling transactions since webhook access is unavailable
+startPollingService();
+
 // ============= DOCUMENTATION =============
 
 // Swagger JSON endpoint with CORS headers
@@ -71,6 +78,31 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   },
   customCss: '.swagger-ui .topbar { display: none }'
 }));
+
+// ============= HEALTH CHECK =============
+
+/**
+ * Health Check Endpoint
+ * Returns API status and available endpoints
+ */
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    message: 'Aboki API is running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: '/api/auth',
+      users: '/api/users',
+      invites: '/api/invites',
+      wallet: '/api/wallet',
+      onramp: '/api/onramp',
+      offramp: '/api/offramp',
+      transfer: '/api/transfer',
+      docs: '/api-docs'
+    }
+  });
+});
 
 // ============= API ROUTES =============
 
@@ -115,13 +147,18 @@ app.use('/api/wallet', walletRoutes);
  * @route /api/onramp
  * - GET /rate - Get onramp rate
  * - POST /initiate - Initiate onramp
+ * - GET /verify/:reference - Verify payment
+ * - GET /history - Get transaction history
+ * - POST /webhook - Monnify webhook
  */
 app.use('/api/onramp', onrampRoutes);
 
 /**
  * Offramp Routes (USDC → NGN)
  * @route /api/offramp
+ * - GET / - Offramp endpoint info
  * - GET /rate - Get offramp rate
+ * - POST /verify-account - Verify bank account
  * - POST /initiate - Initiate offramp
  * - POST /confirm-transfer - Confirm blockchain transfer
  * - GET /status/:reference - Get transaction status
@@ -132,6 +169,11 @@ app.use('/api/onramp', onrampRoutes);
  * - DELETE /beneficiaries/:id - Delete beneficiary
  * - PUT /beneficiaries/:id/default - Set default beneficiary
  * - GET /frequent-accounts - Get frequent accounts
+ * 
+ * Polling Service:
+ * - Automatically polls Lenco API every 30 seconds for pending/settling transactions
+ * - Updates transaction status without webhook access
+ * - Handles timeouts after 30 minutes
  */
 app.use('/api/offramp', offrampRoutes);
 
@@ -143,35 +185,11 @@ app.use('/api/offramp', offrampRoutes);
  */
 app.use('/api/transfer', transferRoutes);
 
-// ============= HEALTH CHECK =============
-
-/**
- * Health Check Endpoint
- * Returns API status and available endpoints
- */
-app.get('/', (req: Request, res: Response) => {
-  res.json({
-    success: true,
-    message: 'Aboki API is running',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      auth: '/api/auth',
-      users: '/api/users',
-      invites: '/api/invites',
-      wallet: '/api/wallet',
-      onramp: '/api/onramp',
-      offramp: '/api/offramp',
-      transfer: '/api/transfer',
-      docs: '/api-docs'
-    }
-  });
-});
-
 // ============= 404 HANDLER =============
 
 /**
  * 404 Not Found Handler
+ * Must be AFTER all route definitions
  */
 app.use((req: Request, res: Response) => {
   res.status(404).json({
@@ -179,15 +197,17 @@ app.use((req: Request, res: Response) => {
     error: 'Route not found',
     path: req.path,
     method: req.method,
+    message: 'This endpoint does not exist. Check /api-docs for available routes.',
     availableRoutes: [
-      '/api/auth',
-      '/api/users',
-      '/api/invites',
-      '/api/wallet',
-      '/api/onramp',
-      '/api/offramp',
-      '/api/transfer',
-      '/api-docs'
+      'GET  /',
+      'GET  /api/auth',
+      'GET  /api/users',
+      'GET  /api/invites',
+      'GET  /api/wallet',
+      'GET  /api/onramp',
+      'GET  /api/offramp',
+      'GET  /api/transfer',
+      'GET  /api-docs'
     ]
   });
 });
@@ -197,6 +217,7 @@ app.use((req: Request, res: Response) => {
 /**
  * Global Error Handler
  * Catches all errors and returns standardized response
+ * Must be LAST middleware
  */
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('❌ Error:', err.message);
@@ -240,6 +261,7 @@ app.listen(PORT, () => {
 ║   ✅ MongoDB Connected                                        ║
 ║   ✅ CORS Enabled                                             ║
 ║   ✅ Swagger Docs Available                                   ║
+║   ✅ Lenco Polling Service Started                            ║
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
   `);

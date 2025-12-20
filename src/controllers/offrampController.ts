@@ -59,9 +59,67 @@ function logTransaction(stage: string, data: any): void {
 // ============= CONTROLLERS =============
 
 /**
- * @desc    Get offramp rate (detailed breakdown - PAYCREST)
- * @route   GET /api/offramp/rate?amountUSDC=100
- * @access  Public
+ * Get offramp rate with fee breakdown
+ * @swagger
+ * /api/offramp/rate:
+ *   get:
+ *     summary: Get current offramp rate
+ *     description: |
+ *       Get the current USDC/NGN exchange rate with detailed fee breakdown.
+ *       
+ *       Rate Calculation:
+ *       - Base Rate: From Paycrest (fallback: 1400 NGN/USDC)
+ *       - Offramp Rate: Base Rate + ₦20 markup
+ *       - Fee: 1% of USDC (capped at $2) - DEDUCTED from amount
+ *       - LP Fee: 0.5% of net USDC to admin wallet
+ *       
+ *       Example: 100 USDC offramp
+ *       - Fee: 1 USDC (1% of 100)
+ *       - Net: 99 USDC
+ *       - NGN: 99 × 1420 = 140,580 NGN
+ *       - You receive: ₦140,580
+ *     tags: [Offramp]
+ *     parameters:
+ *       - in: query
+ *         name: amountUSDC
+ *         required: true
+ *         schema:
+ *           type: number
+ *         description: Amount in USDC to offramp
+ *         example: 100
+ *     responses:
+ *       200:
+ *         description: Rate calculated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     baseRate:
+ *                       type: number
+ *                       example: 1400
+ *                     offrampRate:
+ *                       type: number
+ *                       example: 1420
+ *                     calculation:
+ *                       type: object
+ *                       properties:
+ *                         amountUSDC:
+ *                           type: number
+ *                         feeUSDC:
+ *                           type: number
+ *                         netUSDC:
+ *                           type: number
+ *                         ngnAmount:
+ *                           type: number
+ *       400:
+ *         description: Invalid amount parameter
  */
 export const getRate = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -96,9 +154,89 @@ export const getRate = async (req: Request, res: Response): Promise<void> => {
 };
 
 /**
- * @desc    Initiate offramp (USDC → NGN)
- * @route   POST /api/offramp/initiate
- * @access  Private (requires JWT)
+ * Initiate USDC to NGN offramp
+ * @swagger
+ * /api/offramp/initiate:
+ *   post:
+ *     summary: Initiate offramp transaction
+ *     description: |
+ *       Start a USDC to NGN conversion. Transaction remains PENDING until user confirms
+ *       the blockchain transaction from their Smart Account.
+ *       
+ *       Process:
+ *       1. Validate beneficiary bank account (via Lenco)
+ *       2. Calculate rate and fees
+ *       3. Create transaction record (status: PENDING)
+ *       4. User receives transaction reference
+ *       5. User signs Aboki.createOrder() with Smart Account (gasless)
+ *       6. User calls /confirm-transfer with transaction hash
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amountUSDC
+ *               - beneficiary
+ *             properties:
+ *               amountUSDC:
+ *                 type: number
+ *                 minimum: 10
+ *                 maximum: 5000
+ *                 example: 100
+ *                 description: Amount to convert (10-5000 USDC)
+ *               beneficiary:
+ *                 type: object
+ *                 required:
+ *                   - name
+ *                   - accountNumber
+ *                   - bankCode
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                     example: John Doe
+ *                   accountNumber:
+ *                     type: string
+ *                     example: "1234567890"
+ *                   bankCode:
+ *                     type: string
+ *                     description: Nigerian bank code (e.g., 011 for First Bank)
+ *                     example: "011"
+ *     responses:
+ *       201:
+ *         description: Offramp initiated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     transactionReference:
+ *                       type: string
+ *                       example: ABOKI_OFFRAMP_abc123def456
+ *                     status:
+ *                       type: string
+ *                       enum: [PENDING]
+ *                     amountUSDC:
+ *                       type: number
+ *                     amountNGN:
+ *                       type: number
+ *                     nextStep:
+ *                       type: string
+ *                       example: "User Smart Account signs Aboki.createOrder() (gasless via Paymaster)"
+ *       400:
+ *         description: Invalid request or beneficiary verification failed
+ *       401:
+ *         description: User not authenticated
  */
 export const initiateOfframp = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -191,7 +329,6 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     // ============= STEP 3: Validate Offramp Amount =============
     console.log(`\n💰 Step 3: Validating offramp amount...`);
     
-    // Check minimum and maximum limits
     if (amount < 10) {
       res.status(400).json({
         success: false,
@@ -209,11 +346,6 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     }
 
     console.log(`   ✅ Amount validation passed (${amount} USDC is within limits)`);
-    
-    // NOTE: Admin balance is NOT checked for offramp because:
-    // - Admin RECEIVES USDC from user's Smart Account
-    // - Admin does NOT spend money
-    // - Lenco will check their own NGN balance when settlement is initiated
     console.log(`   ℹ️ Admin receives USDC, doesn't spend it`);
     console.log(`   ℹ️ Lenco will validate NGN liquidity during settlement`);
 
@@ -318,9 +450,67 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
 };
 
 /**
- * @desc    Confirm blockchain transaction (Smart Account sent USDC)
- * @route   POST /api/offramp/confirm-transfer
- * @access  Private (requires JWT)
+ * Confirm blockchain transaction
+ * @swagger
+ * /api/offramp/confirm-transfer:
+ *   post:
+ *     summary: Confirm blockchain USDC transfer
+ *     description: |
+ *       Confirm that the user's Smart Account has successfully transferred USDC to the admin wallet.
+ *       Once confirmed, backend initiates NGN settlement with Lenco (5-15 minutes).
+ *       
+ *       Status Flow: PENDING → PROCESSING → SETTLING → COMPLETED
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - transactionReference
+ *               - txHash
+ *             properties:
+ *               transactionReference:
+ *                 type: string
+ *                 example: ABOKI_OFFRAMP_abc123def456
+ *                 description: Reference from /initiate response
+ *               txHash:
+ *                 type: string
+ *                 example: "0x1234567890abcdef..."
+ *                 description: Blockchain transaction hash
+ *     responses:
+ *       200:
+ *         description: Transfer confirmed, settlement in progress
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     transactionReference:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                       enum: [SETTLING]
+ *                     txHash:
+ *                       type: string
+ *                     lencoReference:
+ *                       type: string
+ *                     estimatedSettlementTime:
+ *                       type: string
+ *                       example: "5-15 minutes"
+ *       400:
+ *         description: Transaction not found or already processed
+ *       401:
+ *         description: User not authenticated
  */
 export const confirmTransfer = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -446,9 +636,52 @@ export const confirmTransfer = async (req: Request, res: Response): Promise<void
 };
 
 /**
- * @desc    Get offramp transaction status
- * @route   GET /api/offramp/status/:reference
- * @access  Private (requires JWT)
+ * Get transaction status
+ * @swagger
+ * /api/offramp/status/{reference}:
+ *   get:
+ *     summary: Get offramp transaction status
+ *     description: Check the current status of an offramp transaction (PENDING, PROCESSING, SETTLING, COMPLETED, FAILED)
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: reference
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Transaction reference (ABOKI_OFFRAMP_...)
+ *         example: ABOKI_OFFRAMP_abc123def456
+ *     responses:
+ *       200:
+ *         description: Transaction status retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     transactionReference:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                       enum: [PENDING, PROCESSING, SETTLING, COMPLETED, FAILED]
+ *                     amountUSDC:
+ *                       type: number
+ *                     amountNGN:
+ *                       type: number
+ *                     createdAt:
+ *                       type: string
+ *                       format: date-time
+ *       404:
+ *         description: Transaction not found
+ *       401:
+ *         description: User not authenticated
  */
 export const getStatus = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -490,9 +723,56 @@ export const getStatus = async (req: Request, res: Response): Promise<void> => {
 };
 
 /**
- * @desc    Get offramp transaction history
- * @route   GET /api/offramp/history
- * @access  Private (requires JWT)
+ * Get transaction history
+ * @swagger
+ * /api/offramp/history:
+ *   get:
+ *     summary: Get offramp transaction history
+ *     description: Get all your offramp transactions with pagination support
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *           maximum: 50
+ *         description: Number of transactions to return
+ *       - in: query
+ *         name: skip
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Number of transactions to skip (for pagination)
+ *     responses:
+ *       200:
+ *         description: Transaction history retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     total:
+ *                       type: integer
+ *                     limit:
+ *                       type: integer
+ *                     skip:
+ *                       type: integer
+ *                     hasMore:
+ *                       type: boolean
+ *       401:
+ *         description: User not authenticated
  */
 export const getHistory = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -538,9 +818,40 @@ export const getHistory = async (req: Request, res: Response): Promise<void> => 
 };
 
 /**
- * @desc    Handle Lenco webhook confirmation
- * @route   POST /api/offramp/webhook/lenco
- * @access  Public (but signature verified)
+ * Handle Lenco webhook
+ * @swagger
+ * /api/offramp/webhook/lenco:
+ *   post:
+ *     summary: Lenco settlement webhook
+ *     description: |
+ *       Webhook endpoint for Lenco to confirm settlement completion or failure.
+ *       Updates transaction status to COMPLETED or FAILED.
+ *       
+ *       Lenco sends POST request when NGN settlement is complete.
+ *       Signature is verified for security.
+ *     tags: [Offramp]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               event:
+ *                 type: string
+ *                 enum: [transfer.completed, transfer.failed]
+ *               data:
+ *                 type: object
+ *                 properties:
+ *                   reference:
+ *                     type: string
+ *                   reason:
+ *                     type: string
+ *     responses:
+ *       200:
+ *         description: Webhook processed successfully
+ *       401:
+ *         description: Invalid signature
  */
 export const handleLencoWebhook = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -623,10 +934,117 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
   }
 };
 
+
 /**
- * @desc    Add beneficiary
- * @route   POST /api/offramp/beneficiaries
- * @access  Private (requires JWT)
+ * Verify bank account
+ */
+export const verifyAccount = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { accountNumber, bankCode } = req.body;
+  
+      console.log(`\n🔍 Verifying bank account...`);
+      console.log(`   Account: ${accountNumber}`);
+      console.log(`   Bank Code: ${bankCode}`);
+  
+      // Validate account number format
+      if (!/^\d{10}$/.test(accountNumber)) {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid account number. Must be 10 digits.'
+        });
+        return;
+      }
+  
+      // Call Lenco verification service
+      const bankDetails = await verifyBankAccount(bankCode, accountNumber);
+  
+      if (!bankDetails.success) {
+        console.error(`   ❌ Verification failed: ${bankDetails.error}`);
+        res.status(400).json({
+          success: false,
+          error: bankDetails.error || 'Account verification failed',
+          details: 'Please check the account number and bank code'
+        });
+        return;
+      }
+  
+      console.log(`   ✅ Account verified: ${bankDetails.accountName}`);
+  
+      res.status(200).json({
+        success: true,
+        message: 'Account verified successfully',
+        data: {
+          accountName: bankDetails.accountName,
+          accountNumber: bankDetails.accountNumber,
+          bankCode: bankDetails.bankCode,
+          bankName: bankDetails.bankName,
+          isVerified: true
+        }
+      });
+    } catch (error: any) {
+      console.error('❌ Error verifying account:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Account verification failed',
+        details: error.message
+      });
+    }
+  };
+  
+
+/**
+ * Add beneficiary bank account
+ * @swagger
+ * /api/offramp/beneficiaries:
+ *   post:
+ *     summary: Add beneficiary bank account
+ *     description: Add a new bank account as a beneficiary for offramp transactions
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - accountNumber
+ *               - bankCode
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 example: John Doe
+ *               accountNumber:
+ *                 type: string
+ *                 example: "1234567890"
+ *               bankCode:
+ *                 type: string
+ *                 example: "011"
+ *     responses:
+ *       201:
+ *         description: Beneficiary added successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     name:
+ *                       type: string
+ *                     isVerified:
+ *                       type: boolean
+ *       400:
+ *         description: Beneficiary verification failed
+ *       401:
+ *         description: User not authenticated
  */
 export const addBeneficiary = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -694,9 +1112,31 @@ export const addBeneficiary = async (req: Request, res: Response): Promise<void>
 };
 
 /**
- * @desc    Get beneficiaries
- * @route   GET /api/offramp/beneficiaries
- * @access  Private (requires JWT)
+ * Get beneficiaries
+ * @swagger
+ * /api/offramp/beneficiaries:
+ *   get:
+ *     summary: Get all beneficiaries
+ *     description: Retrieve all saved beneficiary bank accounts
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Beneficiaries retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       401:
+ *         description: User not authenticated
  */
 export const getBeneficiaries = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -726,9 +1166,31 @@ export const getBeneficiaries = async (req: Request, res: Response): Promise<voi
 };
 
 /**
- * @desc    Delete beneficiary
- * @route   DELETE /api/offramp/beneficiaries/:id
- * @access  Private (requires JWT)
+ * Delete beneficiary
+ * @swagger
+ * /api/offramp/beneficiaries/{id}:
+ *   delete:
+ *     summary: Delete beneficiary
+ *     description: Remove a beneficiary account (cannot delete default)
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Beneficiary ID
+ *     responses:
+ *       200:
+ *         description: Beneficiary deleted
+ *       400:
+ *         description: Cannot delete default beneficiary
+ *       404:
+ *         description: Beneficiary not found
+ *       401:
+ *         description: User not authenticated
  */
 export const deleteBeneficiary = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -777,9 +1239,29 @@ export const deleteBeneficiary = async (req: Request, res: Response): Promise<vo
 };
 
 /**
- * @desc    Set default beneficiary
- * @route   PUT /api/offramp/beneficiaries/:id/default
- * @access  Private (requires JWT)
+ * Set default beneficiary
+ * @swagger
+ * /api/offramp/beneficiaries/{id}/default:
+ *   put:
+ *     summary: Set default beneficiary
+ *     description: Set a beneficiary as the default for offramp transactions
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Beneficiary ID
+ *     responses:
+ *       200:
+ *         description: Default beneficiary updated
+ *       404:
+ *         description: Beneficiary not found
+ *       401:
+ *         description: User not authenticated
  */
 export const setDefaultBeneficiary = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -823,9 +1305,46 @@ export const setDefaultBeneficiary = async (req: Request, res: Response): Promis
 };
 
 /**
- * @desc    Get frequent accounts
- * @route   GET /api/offramp/frequent-accounts
- * @access  Private (requires JWT)
+ * Get frequent accounts
+ * @swagger
+ * /api/offramp/frequent-accounts:
+ *   get:
+ *     summary: Get frequently used bank accounts
+ *     description: Get list of frequently used bank accounts for quick offramp selection
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [top, recent]
+ *           default: top
+ *         description: Sort by top (most used) or recent
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *           maximum: 20
+ *         description: Number of accounts to return
+ *     responses:
+ *       200:
+ *         description: Frequent accounts retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       401:
+ *         description: User not authenticated
  */
 export const getFrequentAccounts = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -872,6 +1391,7 @@ export default {
   addBeneficiary,
   getBeneficiaries,
   deleteBeneficiary,
+  verifyAccount, 
   setDefaultBeneficiary,
   getFrequentAccounts
 };

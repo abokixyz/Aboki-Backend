@@ -329,7 +329,7 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     // ============= STEP 3: Validate Offramp Amount =============
     console.log(`\n💰 Step 3: Validating offramp amount...`);
     
-    if (amount < 10) {
+    if (amount < 0.1) {
       res.status(400).json({
         success: false,
         error: 'Minimum offramp amount is 10 USDC'

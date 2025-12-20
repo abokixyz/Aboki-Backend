@@ -238,9 +238,23 @@ export const getRate = async (req: Request, res: Response): Promise<void> => {
  *       401:
  *         description: User not authenticated
  */
+// ============= FLEXIBLE INITIATE OFFRAMP =============
+// Handles 3 input formats:
+// 1. Direct account (accountNumber, bankCode, name at root level)
+// 2. Beneficiary object: { beneficiary: { name, accountNumber, bankCode } }
+// 3. Frequent account ID: { frequentAccountId: "..." }
+
 export const initiateOfframp = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { amountUSDC, beneficiary } = req.body;
+    const { 
+      amountUSDC, 
+      beneficiary, 
+      accountNumber,
+      bankCode,
+      name,
+      frequentAccountId
+    } = req.body;
+    
     const userId = (req as any).user?.id;
 
     if (!userId) {
@@ -251,19 +265,10 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    if (!amountUSDC || !beneficiary) {
+    if (!amountUSDC) {
       res.status(400).json({
         success: false,
-        error: 'Missing required fields: amountUSDC, beneficiary'
-      });
-      return;
-    }
-
-    const { name, accountNumber, bankCode } = beneficiary;
-    if (!name || !accountNumber || !bankCode) {
-      res.status(400).json({
-        success: false,
-        error: 'Missing beneficiary fields: name, accountNumber, bankCode'
+        error: 'Missing required field: amountUSDC'
       });
       return;
     }
@@ -277,13 +282,68 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
       return;
     }
 
+    // ============= EXTRACT ACCOUNT DETAILS FROM 3 SOURCES =============
+    let accountDetails: any = {};
+
+    // Option 1: Beneficiary object
+    if (beneficiary && beneficiary.accountNumber && beneficiary.bankCode) {
+      accountDetails = {
+        name: beneficiary.name,
+        accountNumber: beneficiary.accountNumber,
+        bankCode: beneficiary.bankCode
+      };
+    }
+    // Option 2: Direct flat structure (accountNumber, bankCode, name at root)
+    else if (accountNumber && bankCode) {
+      accountDetails = {
+        name: name || 'Unknown',
+        accountNumber,
+        bankCode
+      };
+    }
+    // Option 3: Frequent account ID
+    else if (frequentAccountId) {
+      try {
+        const frequentAccount = await FrequentAccount.findById(frequentAccountId);
+        if (!frequentAccount || frequentAccount.userId.toString() !== userId) {
+          res.status(404).json({
+            success: false,
+            error: 'Frequent account not found'
+          });
+          return;
+        }
+        accountDetails = {
+          name: frequentAccount.name,  // ← Change this to match your model
+          accountNumber: frequentAccount.accountNumber,
+          bankCode: frequentAccount.bankCode
+        };
+      } catch (error: any) {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid frequent account ID'
+        });
+        return;
+      }
+    }
+    // No valid input format
+    else {
+      res.status(400).json({
+        success: false,
+        error: 'Missing account details. Provide one of: beneficiary object, direct account details (accountNumber, bankCode, name), or frequentAccountId'
+      });
+      return;
+    }
+
+    const { name: accName, accountNumber: accNumber, bankCode: accCode } = accountDetails;
+
     logTransaction('INITIATE OFFRAMP', {
       userId,
       amountUSDC: amount,
+      source: frequentAccountId ? 'frequentAccount' : 'direct',
       beneficiary: {
-        name,
-        accountNumber: accountNumber.slice(-4).padStart(accountNumber.length, '*'),
-        bankCode
+        name: accName,
+        accountNumber: accNumber.slice(-4).padStart(accNumber.length, '*'),
+        bankCode: accCode
       }
     });
 
@@ -291,7 +351,7 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     console.log(`\n🏦 Step 1: Verifying bank account with Lenco...`);
     let bankDetails;
     try {
-      bankDetails = await verifyBankAccount(bankCode, accountNumber);
+      bankDetails = await verifyBankAccount(accCode, accNumber);
       console.log(`   ✅ Bank account verified: ${bankDetails.accountName}`);
     } catch (error: any) {
       console.error(`   ❌ Bank verification failed: ${error.message}`);
@@ -346,8 +406,6 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     }
 
     console.log(`   ✅ Amount validation passed (${amount} USDC is within limits)`);
-    console.log(`   ℹ️ Admin receives USDC, doesn't spend it`);
-    console.log(`   ℹ️ Lenco will validate NGN liquidity during settlement`);
 
     // ============= STEP 4: Get User Info =============
     console.log(`\n👤 Step 4: Getting user info...`);
@@ -386,9 +444,9 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
       offrampRate: rateData.data.offrampRate,
       effectiveRate: rateData.data.calculation.effectiveRate,
       beneficiary: {
-        name: bankDetails.accountName || name,
-        accountNumber,
-        bankCode,
+        name: bankDetails.accountName || accName,
+        accountNumber: accNumber,
+        bankCode: accCode,
         bankName: bankDetails.bankName
       },
       lpFeeUSDC: rateData.data.calculation.lpFeeUSDC,
@@ -406,10 +464,10 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     try {
       await FrequentAccount.recordUsage(
         userId,
-        accountNumber,
-        bankCode,
+        accNumber,
+        accCode,
         amount,
-        name
+        accName
       );
       console.log(`   ✅ Frequent account recorded`);
     } catch (error: any) {
@@ -429,8 +487,8 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
         amountNGN: rateData.data.calculation.ngnAmount,
         offrampRate: rateData.data.offrampRate,
         bankName: bankDetails.bankName,
-        accountNumber: accountNumber.slice(-4).padStart(accountNumber.length, '*'),
-        accountName: bankDetails.accountName || name,
+        accountNumber: accNumber.slice(-4).padStart(accNumber.length, '*'),
+        accountName: bankDetails.accountName || accName,
         userSmartAccount: user.wallet.smartAccountAddress,
         adminLiquidityProvider: ADMIN_WALLET_ADDRESS,
         nextStep: 'User Smart Account signs Aboki.createOrder() (gasless via Paymaster)',

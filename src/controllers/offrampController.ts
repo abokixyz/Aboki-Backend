@@ -188,7 +188,7 @@ export const getRate = async (req: Request, res: Response): Promise<void> => {
  *                 minimum: 0.1
  *                 maximum: 5000
  *                 example: 100
- *                 description: Amount to convert (10-5000 USDC)
+ *                 description: Amount to convert (0.1-5000 USDC)
  *               beneficiary:
  *                 type: object
  *                 required:
@@ -332,7 +332,7 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
     if (amount < 0.1) {
       res.status(400).json({
         success: false,
-        error: 'Minimum offramp amount is 10 USDC'
+        error: 'Minimum offramp amount is 0.1 USDC'
       });
       return;
     }
@@ -1244,7 +1244,6 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
   }
 };
 
-
 /**
  * Verify bank account
  */
@@ -1300,7 +1299,6 @@ export const verifyAccount = async (req: Request, res: Response): Promise<void> 
       });
     }
   };
-  
 
 /**
  * Add beneficiary bank account
@@ -1690,8 +1688,6 @@ export const getFrequentAccounts = async (req: Request, res: Response): Promise<
     });
   }
 };
-
-
 
 export default {
   getRate,

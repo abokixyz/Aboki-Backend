@@ -17,7 +17,7 @@ const PAYCREST_API_KEY = process.env.PAYCREST_API_KEY || '';
 const PAYCREST_API_URL = process.env.PAYCREST_API_URL || 'https://api.paycrest.io/v1';
 
 // Offramp constants
-export const MIN_OFFRAMP = 0.1; // Minimum 10 USDC
+export const MIN_OFFRAMP = 0.1; // Minimum 0.1 USDC
 export const MAX_OFFRAMP = 5000; // Maximum 5000 USDC
 export const DEFAULT_FALLBACK_RATE = 1400; // NGN per USDC
 export const OFFRAMP_MARKUP = 20; // NGN markup

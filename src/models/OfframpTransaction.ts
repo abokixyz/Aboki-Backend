@@ -1,19 +1,13 @@
-// ============= src/models/OfframpTransaction.ts =============
-/**
- * Offramp Transaction Model
- * 
- * Tracks USDC → NGN offramp transactions
- * Records transaction status, amounts, fees, and settlement details
- */
-
+// ============= src/models/OfframpTransaction.ts (UPDATED FOR POLLING) =============
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
-// ============= INTERFACE =============
-
-export interface IOfframpTransaction extends Document {
+interface IOfframpTransaction extends Document {
+  // Identifiers
   transactionReference: string;
-  userId: string;
+  userId: mongoose.Types.ObjectId;
   userAddress: string;
+
+  // Amount & Rate
   amountUSDC: number;
   feeUSDC: number;
   netUSDC: number;
@@ -21,46 +15,65 @@ export interface IOfframpTransaction extends Document {
   baseRate: number;
   offrampRate: number;
   effectiveRate: number;
+  lpFeeUSDC: number;
+
+  // Beneficiary
   beneficiary: {
     name: string;
     accountNumber: string;
     bankCode: string;
-    bankName: string;
+    bankName?: string;
   };
-  lpFeeUSDC: number;
-  status: 'PENDING' | 'PROCESSING' | 'SETTLING' | 'COMPLETED' | 'FAILED';
-  rateSource: 'Paycrest' | 'Fallback';
-  cached: boolean;
+
+  // Blockchain
   transactionHash?: string;
+
+  // Lenco Integration
   lencoReference?: string;
-  processedAt?: Date;
-  settledAt?: Date;
-  completedAt?: Date;
+  lencoStatus?: string; // pending, processing, successful, failed, rejected
+
+  // Status
+  status: 'PENDING' | 'PROCESSING' | 'SETTLING' | 'COMPLETED' | 'FAILED';
+
+  // Error Handling
   errorCode?: string;
   errorMessage?: string;
   failureReason?: string;
-  webhookAttempts: number;
-  createdAt: Date;
-  updatedAt: Date;
 
-  // Instance methods
+  // Polling Tracking (NEW)
+  pollAttempts?: number; // Number of times we've polled this transaction
+  lastPolledAt?: Date; // Last time we checked status with Lenco
+  polledAt?: Date; // When we last updated via polling
+
+  // Timestamps
+  createdAt?: Date;
+  processedAt?: Date; // When user confirmed with passkey
+  settledAt?: Date; // When settlement was initiated
+  completedAt?: Date; // When settlement finished
+  passkeyVerifiedAt?: Date; // When passkey verification occurred
+  passkeyVerified?: boolean;
+
+  // Metadata
+  rateSource?: 'Paycrest' | 'Fallback';
+  cached?: boolean;
+  webhookAttempts?: number;
+
+  // Methods
   getSummary(): any;
 }
 
-// ============= STATIC METHODS INTERFACE =============
-
+// Define the static methods interface
 interface IOfframpTransactionModel extends Model<IOfframpTransaction> {
   findUserTransactions(
     userId: string,
-    limit: number,
-    skip: number
+    limit?: number,
+    skip?: number
   ): Promise<IOfframpTransaction[]>;
 }
 
-// ============= SCHEMA =============
-
-const offrampTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransactionModel>(
+const OfframpTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransactionModel>(
   {
+    // Identifiers
     transactionReference: {
       type: String,
       required: true,
@@ -68,7 +81,8 @@ const offrampTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
       index: true
     },
     userId: {
-      type: String,
+      type: Schema.Types.ObjectId,
+      ref: 'User',
       required: true,
       index: true
     },
@@ -76,6 +90,8 @@ const offrampTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
       type: String,
       required: true
     },
+
+    // Amount & Rate
     amountUSDC: {
       type: Number,
       required: true
@@ -104,39 +120,63 @@ const offrampTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
       type: Number,
       required: true
     },
-    beneficiary: {
-      name: { type: String, required: true },
-      accountNumber: { type: String, required: true },
-      bankCode: { type: String, required: true },
-      bankName: { type: String, required: true }
-    },
     lpFeeUSDC: {
       type: Number,
       required: true
     },
+
+    // Beneficiary
+    beneficiary: {
+      name: String,
+      accountNumber: String,
+      bankCode: String,
+      bankName: String
+    },
+
+    // Blockchain
+    transactionHash: String,
+
+    // Lenco Integration
+    lencoReference: String,
+    lencoStatus: String, // Track Lenco's status independently
+
+    // Status
     status: {
       type: String,
       enum: ['PENDING', 'PROCESSING', 'SETTLING', 'COMPLETED', 'FAILED'],
       default: 'PENDING',
       index: true
     },
-    rateSource: {
-      type: String,
-      enum: ['Paycrest', 'Fallback'],
-      default: 'Paycrest'
-    },
-    cached: {
-      type: Boolean,
-      default: false
-    },
-    transactionHash: String,
-    lencoReference: String,
-    processedAt: Date,
-    settledAt: Date,
-    completedAt: Date,
+
+    // Error Handling
     errorCode: String,
     errorMessage: String,
     failureReason: String,
+
+    // Polling Tracking (NEW)
+    pollAttempts: {
+      type: Number,
+      default: 0
+    },
+    lastPolledAt: Date,
+    polledAt: Date,
+
+    // Timestamps
+    processedAt: Date,
+    settledAt: Date,
+    completedAt: Date,
+    passkeyVerifiedAt: Date,
+    passkeyVerified: {
+      type: Boolean,
+      default: false
+    },
+
+    // Metadata
+    rateSource: {
+      type: String,
+      enum: ['Paycrest', 'Fallback']
+    },
+    cached: Boolean,
     webhookAttempts: {
       type: Number,
       default: 0
@@ -148,48 +188,47 @@ const offrampTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
   }
 );
 
-// ============= INDEXES =============
+// Indexes for querying
+OfframpTransactionSchema.index({ userId: 1, status: 1 });
+OfframpTransactionSchema.index({ status: 1, lencoReference: 1 });
+OfframpTransactionSchema.index({ createdAt: -1 });
+OfframpTransactionSchema.index({ status: 1, processedAt: 1 }); // For polling query
 
-offrampTransactionSchema.index({ userId: 1, createdAt: -1 });
-offrampTransactionSchema.index({ transactionReference: 1 });
-offrampTransactionSchema.index({ lencoReference: 1 });
-offrampTransactionSchema.index({ status: 1 });
-
-// ============= INSTANCE METHODS =============
-
-/**
- * Get transaction summary
- */
-offrampTransactionSchema.methods.getSummary = function(): any {
+// Get summary of transaction
+OfframpTransactionSchema.methods.getSummary = function() {
   return {
     transactionReference: this.transactionReference,
     status: this.status,
     amountUSDC: this.amountUSDC,
     amountNGN: this.amountNGN,
-    feeUSDC: this.feeUSDC,
-    offrampRate: this.offrampRate,
-    bankName: this.beneficiary?.bankName,
-    accountName: this.beneficiary?.name,
-    accountNumber: this.beneficiary?.accountNumber?.slice(-4).padStart(this.beneficiary?.accountNumber?.length || 4, '*'),
+    beneficiary: {
+      name: this.beneficiary.name,
+      accountNumber: this.beneficiary.accountNumber.slice(-4).padStart(this.beneficiary.accountNumber.length, '*'),
+      bankName: this.beneficiary.bankName
+    },
     createdAt: this.createdAt,
     processedAt: this.processedAt,
     completedAt: this.completedAt,
-    txHash: this.transactionHash,
     lencoReference: this.lencoReference,
-    errorMessage: this.errorMessage,
-    failureReason: this.failureReason
+    lencoStatus: this.lencoStatus,
+    pollingInfo: {
+      pollAttempts: this.pollAttempts || 0,
+      lastPolledAt: this.lastPolledAt,
+      isStale: this.lastPolledAt && (Date.now() - this.lastPolledAt.getTime()) > 5 * 60 * 1000 // More than 5 minutes old
+    },
+    error: this.errorMessage ? {
+      code: this.errorCode,
+      message: this.errorMessage,
+      reason: this.failureReason
+    } : null
   };
 };
 
-// ============= STATIC METHODS =============
-
-/**
- * Find user transactions with pagination
- */
-offrampTransactionSchema.statics.findUserTransactions = async function(
+// Static method to find user's transactions
+OfframpTransactionSchema.statics.findUserTransactions = async function(
   userId: string,
-  limit: number,
-  skip: number
+  limit: number = 10,
+  skip: number = 0
 ): Promise<IOfframpTransaction[]> {
   return this.find({ userId })
     .sort({ createdAt: -1 })
@@ -198,9 +237,9 @@ offrampTransactionSchema.statics.findUserTransactions = async function(
     .lean();
 };
 
-// ============= MODEL =============
-
-export default mongoose.model<IOfframpTransaction, IOfframpTransactionModel>(
+const OfframpTransaction = mongoose.model<IOfframpTransaction, IOfframpTransactionModel>(
   'OfframpTransaction',
-  offrampTransactionSchema
+  OfframpTransactionSchema
 );
+
+export default OfframpTransaction;

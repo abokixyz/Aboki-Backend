@@ -636,6 +636,316 @@ export const confirmTransfer = async (req: Request, res: Response): Promise<void
 };
 
 /**
+ * Confirm Account and Sign Transaction with Passkey
+ * 
+ * @swagger
+ * /api/offramp/confirm-account-and-sign:
+ *   post:
+ *     summary: Confirm account details and sign transaction with passkey
+ *     description: |
+ *       Verify account details match, validate passkey signature, and initiate settlement.
+ *       This is the NEW endpoint that combines:
+ *       1. Account verification (confirm account details match)
+ *       2. Passkey verification (check X-Passkey-Verified header)
+ *       3. Lenco settlement initiation
+ *       4. Status update to SETTLING
+ *     tags: [Offramp]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: X-Passkey-Verified
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [true]
+ *         description: Must be 'true' after successful passkey verification
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - transactionReference
+ *               - accountNumber
+ *               - bankCode
+ *             properties:
+ *               transactionReference:
+ *                 type: string
+ *                 example: ABOKI_OFFRAMP_abc123def456
+ *                 description: Reference from /initiate response
+ *               accountNumber:
+ *                 type: string
+ *                 example: "1234567890"
+ *                 description: Must match the account from initiate
+ *               bankCode:
+ *                 type: string
+ *                 example: "011"
+ *                 description: Must match the bank code from initiate
+ *     responses:
+ *       200:
+ *         description: Account confirmed and transaction signed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     transactionReference:
+ *                       type: string
+ *                     status:
+ *                       type: string
+ *                       enum: [SETTLING]
+ *                     verifiedWithPasskey:
+ *                       type: boolean
+ *                     lencoReference:
+ *                       type: string
+ *                     estimatedSettlementTime:
+ *                       type: string
+ *       400:
+ *         description: Account details mismatch or transaction already processed
+ *       401:
+ *         description: Passkey verification required
+ */
+export const confirmAccountAndSign = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { transactionReference, accountNumber, bankCode } = req.body;
+    const userId = (req as any).user?.id;
+    const passkeyVerified = req.headers['x-passkey-verified'];
+
+    console.log('\n' + '═'.repeat(70));
+    console.log('🔐 CONFIRM ACCOUNT & SIGN TRANSACTION');
+    console.log('═'.repeat(70));
+
+    // ============= STEP 1: Validate Passkey Verification =============
+    console.log('\n✓ Step 1: Validating passkey verification...');
+    
+    if (!userId) {
+      console.error('  ❌ User not authenticated');
+      res.status(401).json({
+        success: false,
+        error: 'User not authenticated'
+      });
+      return;
+    }
+
+    if (!passkeyVerified || passkeyVerified !== 'true') {
+      console.error('  ❌ Passkey verification header missing or invalid');
+      res.status(401).json({
+        success: false,
+        error: 'Passkey verification required',
+        code: 'PASSKEY_VERIFICATION_REQUIRED',
+        requiresPasskeyVerification: true,
+        message: 'Please verify this transaction with your passkey before proceeding',
+        hint: 'Complete the passkey verification flow first'
+      });
+      return;
+    }
+
+    console.log('  ✅ Passkey verification header valid');
+
+    // ============= STEP 2: Validate Input =============
+    console.log('\n✓ Step 2: Validating input...');
+    
+    if (!transactionReference || !accountNumber || !bankCode) {
+      console.error('  ❌ Missing required fields');
+      res.status(400).json({
+        success: false,
+        error: 'Missing required fields: transactionReference, accountNumber, bankCode'
+      });
+      return;
+    }
+
+    console.log('  ✅ All required fields present');
+
+    // ============= STEP 3: Find Transaction =============
+    console.log('\n✓ Step 3: Finding transaction...');
+    
+    const transaction = await OfframpTransaction.findOne({
+      transactionReference,
+      userId
+    });
+
+    if (!transaction) {
+      console.error('  ❌ Transaction not found');
+      res.status(404).json({
+        success: false,
+        error: 'Transaction not found'
+      });
+      return;
+    }
+
+    if (transaction.status !== 'PENDING') {
+      console.error(`  ❌ Transaction status is ${transaction.status}, not PENDING`);
+      res.status(400).json({
+        success: false,
+        error: `Transaction is already ${transaction.status}. Cannot confirm again.`
+      });
+      return;
+    }
+
+    console.log(`  ✅ Transaction found: ${transactionReference}`);
+    console.log(`     Status: ${transaction.status}`);
+    console.log(`     Amount: ${transaction.amountUSDC} USDC → ₦${transaction.amountNGN.toFixed(2)}`);
+
+    // ============= STEP 4: Verify Account Details Match =============
+    console.log('\n✓ Step 4: Verifying account details match...');
+    
+    const originalAccountNumber = transaction.beneficiary.accountNumber;
+    const originalBankCode = transaction.beneficiary.bankCode;
+
+    if (accountNumber !== originalAccountNumber) {
+      console.error(`  ❌ Account number mismatch`);
+      console.error(`     Expected: ${originalAccountNumber}`);
+      console.error(`     Got: ${accountNumber}`);
+      res.status(400).json({
+        success: false,
+        error: 'Account number does not match the original transaction',
+        hint: 'Please use the same account number from the initial offramp request'
+      });
+      return;
+    }
+
+    if (bankCode !== originalBankCode) {
+      console.error(`  ❌ Bank code mismatch`);
+      console.error(`     Expected: ${originalBankCode}`);
+      console.error(`     Got: ${bankCode}`);
+      res.status(400).json({
+        success: false,
+        error: 'Bank code does not match the original transaction',
+        hint: 'Please use the same bank code from the initial offramp request'
+      });
+      return;
+    }
+
+    console.log('  ✅ Account details verified');
+    console.log(`     Account: ${transaction.beneficiary.accountNumber} (${transaction.beneficiary.bankCode})`);
+    console.log(`     Name: ${transaction.beneficiary.name}`);
+
+    // ============= STEP 5: Update Transaction Status =============
+    console.log('\n✓ Step 5: Updating transaction status...');
+    
+    transaction.status = 'PROCESSING';
+    transaction.processedAt = new Date();
+    transaction.passkeyVerified = true;
+    transaction.passkeyVerifiedAt = new Date();
+    
+    await transaction.save();
+    
+    console.log('  ✅ Status updated to PROCESSING');
+    console.log('  ✅ Passkey verification recorded');
+
+    // ============= STEP 6: Initiate Lenco Settlement =============
+    console.log('\n✓ Step 6: Initiating Lenco settlement...');
+    
+    let lencoResult;
+    try {
+      lencoResult = await initiateLencoTransfer(
+        transaction.amountNGN,
+        transaction.beneficiary.accountNumber,
+        transaction.beneficiary.bankCode,
+        transaction.beneficiary.name,
+        transactionReference
+      );
+
+      if (!lencoResult.success) {
+        throw new Error(lencoResult.error || 'Lenco transfer failed');
+      }
+
+      transaction.status = 'SETTLING';
+      transaction.lencoReference = lencoResult.transferId;
+      transaction.settledAt = new Date();
+      
+      await transaction.save();
+      
+      console.log('  ✅ Lenco settlement initiated');
+      console.log(`     Reference: ${lencoResult.transferId}`);
+
+    } catch (error: any) {
+      console.error(`  ❌ Lenco settlement failed: ${error.message}`);
+      
+      // Mark transaction as failed
+      transaction.status = 'FAILED';
+      transaction.errorCode = 'LENCO_ERROR';
+      transaction.errorMessage = 'Lenco settlement failed';
+      transaction.failureReason = error.message;
+      transaction.completedAt = new Date();
+      
+      await transaction.save();
+
+      res.status(500).json({
+        success: false,
+        error: 'Failed to initiate bank settlement',
+        details: error.message,
+        hint: 'Please try again or contact support'
+      });
+      return;
+    }
+
+    // ============= STEP 7: Record Frequent Account =============
+    console.log('\n✓ Step 7: Recording frequent account...');
+    
+    try {
+      await FrequentAccount.recordUsage(
+        userId,
+        accountNumber,
+        bankCode,
+        transaction.amountUSDC,
+        transaction.beneficiary.name
+      );
+      console.log('  ✅ Frequent account recorded');
+    } catch (error: any) {
+      console.warn(`  ⚠️ Failed to record frequent account: ${error.message}`);
+    }
+
+    // ============= RESPONSE =============
+    console.log('\n✅ TRANSACTION CONFIRMED AND SIGNED');
+    console.log(`Status: ${transaction.status}`);
+    console.log('═'.repeat(70) + '\n');
+
+    res.status(200).json({
+      success: true,
+      message: 'Account confirmed and transaction signed with passkey. Settlement in progress.',
+      data: {
+        transactionReference,
+        status: transaction.status,
+        amountUSDC: transaction.amountUSDC,
+        feeUSDC: transaction.feeUSDC,
+        netUSDC: transaction.netUSDC,
+        amountNGN: transaction.amountNGN,
+        accountName: transaction.beneficiary.name,
+        accountNumber: transaction.beneficiary.accountNumber,
+        bankName: transaction.beneficiary.bankName,
+        bankCode: transaction.beneficiary.bankCode,
+        lencoReference: lencoResult?.transferId,
+        verifiedWithPasskey: true,
+        verifiedAt: transaction.passkeyVerifiedAt?.toISOString(),
+        estimatedSettlementTime: '5-15 minutes',
+        nextStep: 'Wait for NGN settlement to your bank account',
+        monitorUrl: `/api/offramp/status/${transactionReference}`
+      }
+    });
+
+  } catch (error: any) {
+    console.error('❌ Error confirming account and signing:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Failed to confirm account and sign transaction',
+      details: error.message
+    });
+  }
+};
+
+/**
  * Get transaction status
  * @swagger
  * /api/offramp/status/{reference}:
@@ -1381,10 +1691,13 @@ export const getFrequentAccounts = async (req: Request, res: Response): Promise<
   }
 };
 
+
+
 export default {
   getRate,
   initiateOfframp,
   confirmTransfer,
+  confirmAccountAndSign,
   getStatus,
   getHistory,
   handleLencoWebhook,

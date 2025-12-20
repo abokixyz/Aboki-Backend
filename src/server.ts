@@ -14,7 +14,7 @@ import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
 import { startPollingService } from './services/lencoPollingService';
 
-// Load environment variables
+// Load environment variables FIRST
 dotenv.config();
 
 // Import routes
@@ -31,46 +31,92 @@ const app: Application = express();
 
 // ============= MIDDLEWARE =============
 
-// Enhanced CORS configuration
+// Trust proxy - IMPORTANT for production behind reverse proxy
+app.set('trust proxy', 1);
+
+// Enhanced CORS configuration - CRITICAL FIX
 const corsOptions = {
   origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    // Allow requests with no origin (mobile apps, Postman, curl)
+    if (!origin) {
+      console.log('✅ CORS: Allowing request with no origin');
+      return callback(null, true);
+    }
     
+    // Get allowed origins from env or use defaults
     const allowedOrigins = process.env.CORS_ORIGIN 
       ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-      : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173'];
+      : [
+          'http://localhost:3000',
+          'http://localhost:3001', 
+          'http://localhost:5173',
+          'https://aboki.xyz',
+          'https://www.aboki.xyz',
+          'https://app.aboki.xyz'
+        ];
+    
+    console.log('🔍 CORS Check:', {
+      requestOrigin: origin,
+      allowedOrigins,
+      isAllowed: allowedOrigins.includes(origin) || allowedOrigins.includes('*')
+    });
     
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      console.log('✅ CORS: Origin allowed -', origin);
       callback(null, true);
     } else {
-      callback(null, false);
+      console.log('❌ CORS: Origin blocked -', origin);
+      callback(new Error(`CORS policy: Origin ${origin} is not allowed`));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-lenco-signature'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With', 
+    'Accept', 
+    'x-lenco-signature',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ],
   exposedHeaders: ['Content-Length', 'X-Requested-With'],
   optionsSuccessStatus: 200,
-  preflightContinue: false
+  preflightContinue: false,
+  maxAge: 86400 // 24 hours
 };
 
+// Apply CORS middleware
 app.use(cors(corsOptions));
 
-// Additional CORS headers middleware (fallback)
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
+
+// Additional CORS headers middleware (defense in depth)
 app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
-  const allowedOrigins = process.env.CORS_ORIGIN 
-    ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173'];
   
-  if (origin && (allowedOrigins.includes(origin) || allowedOrigins.includes('*'))) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+  if (origin) {
+    const allowedOrigins = process.env.CORS_ORIGIN 
+      ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+      : [
+          'http://localhost:3000',
+          'http://localhost:3001', 
+          'http://localhost:5173',
+          'https://aboki.xyz',
+          'https://www.aboki.xyz',
+          'https://app.aboki.xyz'
+        ];
+    
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, x-lenco-signature, Origin');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
   }
-  
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, x-lenco-signature');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   
   // Handle preflight
   if (req.method === 'OPTIONS') {
@@ -80,9 +126,18 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Body parsers
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Body parsers - MUST come after CORS
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request logging middleware (helpful for debugging)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`, {
+    origin: req.headers.origin,
+    userAgent: req.headers['user-agent']?.substring(0, 50)
+  });
+  next();
+});
 
 // ============= DATABASE =============
 
@@ -126,6 +181,7 @@ app.get('/', (req: Request, res: Response) => {
     message: 'Aboki API is running',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
     endpoints: {
       auth: '/api/auth',
       users: '/api/users',
@@ -139,84 +195,58 @@ app.get('/', (req: Request, res: Response) => {
   });
 });
 
+// CORS test endpoint
+app.get('/api/cors-test', (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    message: 'CORS is working correctly',
+    origin: req.headers.origin,
+    method: req.method,
+    headers: req.headers
+  });
+});
+
 // ============= API ROUTES =============
 
 /**
  * Auth Routes
  * @route /api/auth
- * - POST /register - Register new user
- * - POST /login - Login user
- * - POST /refresh - Refresh JWT token
  */
 app.use('/api/auth', authRoutes);
 
 /**
  * User Routes
  * @route /api/users
- * - GET / - Get user profile
- * - PUT / - Update user profile
- * - GET /transactions - Get user transactions
  */
 app.use('/api/users', userRoutes);
 
 /**
  * Invite Routes
  * @route /api/invites
- * - POST / - Create invite
- * - GET / - Get invites
- * - POST /redeem - Redeem invite
  */
 app.use('/api/invites', inviteRoutes);
 
 /**
  * Wallet Routes
  * @route /api/wallet
- * - POST /create - Create Smart Account
- * - GET /balance - Get wallet balance
- * - POST /import - Import wallet
  */
 app.use('/api/wallet', walletRoutes);
 
 /**
  * Onramp Routes (NGN → USDC)
  * @route /api/onramp
- * - GET /rate - Get onramp rate
- * - POST /initiate - Initiate onramp
- * - GET /verify/:reference - Verify payment
- * - GET /history - Get transaction history
- * - POST /webhook - Monnify webhook
  */
 app.use('/api/onramp', onrampRoutes);
 
 /**
  * Offramp Routes (USDC → NGN)
  * @route /api/offramp
- * - GET / - Offramp endpoint info
- * - GET /rate - Get offramp rate
- * - POST /verify-account - Verify bank account
- * - POST /initiate - Initiate offramp
- * - POST /confirm-transfer - Confirm blockchain transfer
- * - GET /status/:reference - Get transaction status
- * - GET /history - Get transaction history
- * - POST /webhook/lenco - Lenco webhook
- * - POST /beneficiaries - Add beneficiary
- * - GET /beneficiaries - Get beneficiaries
- * - DELETE /beneficiaries/:id - Delete beneficiary
- * - PUT /beneficiaries/:id/default - Set default beneficiary
- * - GET /frequent-accounts - Get frequent accounts
- * 
- * Polling Service:
- * - Automatically polls Lenco API every 30 seconds for pending/settling transactions
- * - Updates transaction status without webhook access
- * - Handles timeouts after 30 minutes
  */
 app.use('/api/offramp', offrampRoutes);
 
 /**
  * Transfer Routes (USDC transfer)
  * @route /api/transfer
- * - POST /send - Send USDC
- * - GET /history - Get transfer history
  */
 app.use('/api/transfer', transferRoutes);
 
@@ -235,6 +265,7 @@ app.use((req: Request, res: Response) => {
     message: 'This endpoint does not exist. Check /api-docs for available routes.',
     availableRoutes: [
       'GET  /',
+      'GET  /api/cors-test',
       'GET  /api/auth',
       'GET  /api/users',
       'GET  /api/invites',
@@ -257,6 +288,16 @@ app.use((req: Request, res: Response) => {
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('❌ Error:', err.message);
   console.error('Stack:', err.stack);
+
+  // Handle CORS errors specifically
+  if (err.message.includes('CORS')) {
+    return res.status(403).json({
+      success: false,
+      error: 'CORS Error',
+      message: err.message,
+      hint: 'Check if your origin is allowed in CORS_ORIGIN environment variable'
+    });
+  }
 
   res.status(500).json({
     success: false,
@@ -291,12 +332,15 @@ app.listen(PORT, () => {
 ║   💳 Onramp Endpoints:  ${apiUrl}/api/onramp          ║
 ║   💸 Offramp Endpoints: ${apiUrl}/api/offramp         ║
 ║   🔄 Transfer Endpoints: ${apiUrl}/api/transfer        ║
+║   🧪 CORS Test:         ${apiUrl}/api/cors-test       ║
 ║                                                                ║
 ║   ✅ All Routes Registered                                    ║
 ║   ✅ MongoDB Connected                                        ║
 ║   ✅ CORS Enabled                                             ║
 ║   ✅ Swagger Docs Available                                   ║
 ║   ✅ Lenco Polling Service Started                            ║
+║                                                                ║
+║   CORS Origins: ${process.env.CORS_ORIGIN || 'localhost defaults'}
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
   `);

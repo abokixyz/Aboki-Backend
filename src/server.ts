@@ -1,11 +1,4 @@
-// ============= src/server.ts =============
-/**
- * Express Server Configuration
- * 
- * Main entry point for the API
- * Configures middleware, routes, error handling, and services
- */
-
+// ============= src/server.ts (WITH PASSKEY ROUTES) =============
 import express, { Application, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -19,6 +12,7 @@ dotenv.config();
 
 // Import routes
 import authRoutes from './routes/authRoutes';
+import passkeyTransactionRoutes from './routes/passkeyTransactionRoutes';
 import userRoutes from './routes/userRoutes';
 import inviteRoutes from './routes/inviteRoutes';
 import walletRoutes from './routes/walletRoutes';
@@ -34,16 +28,14 @@ const app: Application = express();
 // Trust proxy - IMPORTANT for production behind reverse proxy
 app.set('trust proxy', 1);
 
-// Enhanced CORS configuration - CRITICAL FIX
+// Enhanced CORS configuration
 const corsOptions = {
   origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-    // Allow requests with no origin (mobile apps, Postman, curl)
     if (!origin) {
       console.log('✅ CORS: Allowing request with no origin');
       return callback(null, true);
     }
     
-    // Get allowed origins from env or use defaults
     const allowedOrigins = process.env.CORS_ORIGIN 
       ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
       : [
@@ -76,6 +68,7 @@ const corsOptions = {
     'Authorization', 
     'X-Requested-With', 
     'Accept', 
+    'X-Passkey-Verified',
     'x-lenco-signature',
     'Origin',
     'Access-Control-Request-Method',
@@ -84,16 +77,14 @@ const corsOptions = {
   exposedHeaders: ['Content-Length', 'X-Requested-With'],
   optionsSuccessStatus: 200,
   preflightContinue: false,
-  maxAge: 86400 // 24 hours
+  maxAge: 86400
 };
 
 // Apply CORS middleware
 app.use(cors(corsOptions));
-
-// Handle preflight requests explicitly
 app.options('*', cors(corsOptions));
 
-// Additional CORS headers middleware (defense in depth)
+// Additional CORS headers middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
   
@@ -113,12 +104,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, x-lenco-signature, Origin');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, X-Passkey-Verified, x-lenco-signature, Origin');
       res.setHeader('Access-Control-Max-Age', '86400');
     }
   }
   
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -126,40 +116,34 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Body parsers - MUST come after CORS
+// Body parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Request logging middleware (helpful for debugging)
+// Request logging middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`, {
     origin: req.headers.origin,
+    passkeyVerified: req.headers['x-passkey-verified'],
     userAgent: req.headers['user-agent']?.substring(0, 50)
   });
   next();
 });
 
 // ============= DATABASE =============
-
-// Connect to MongoDB
 connectDB();
 
 // ============= SERVICES =============
-
-// Start Lenco polling service for offramp transaction status updates
-// This polls Lenco API for pending/settling transactions since webhook access is unavailable
 startPollingService();
 
 // ============= DOCUMENTATION =============
 
-// Swagger JSON endpoint with CORS headers
 app.get('/api-docs/swagger.json', (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.send(swaggerSpec);
 });
 
-// Swagger documentation UI
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   swaggerOptions: {
     url: '/api-docs/swagger.json',
@@ -171,10 +155,6 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 
 // ============= HEALTH CHECK =============
 
-/**
- * Health Check Endpoint
- * Returns API status and available endpoints
- */
 app.get('/', (req: Request, res: Response) => {
   res.json({
     success: true,
@@ -184,6 +164,7 @@ app.get('/', (req: Request, res: Response) => {
     environment: process.env.NODE_ENV || 'development',
     endpoints: {
       auth: '/api/auth',
+      passkey: '/api/auth/passkey',
       users: '/api/users',
       invites: '/api/invites',
       wallet: '/api/wallet',
@@ -195,14 +176,13 @@ app.get('/', (req: Request, res: Response) => {
   });
 });
 
-// CORS test endpoint
 app.get('/api/cors-test', (req: Request, res: Response) => {
   res.json({
     success: true,
     message: 'CORS is working correctly',
     origin: req.headers.origin,
     method: req.method,
-    headers: req.headers
+    passkeyVerified: req.headers['x-passkey-verified']
   });
 });
 
@@ -213,6 +193,12 @@ app.get('/api/cors-test', (req: Request, res: Response) => {
  * @route /api/auth
  */
 app.use('/api/auth', authRoutes);
+
+/**
+ * Passkey Transaction Verification Routes
+ * @route /api/auth/passkey
+ */
+app.use('/api/auth/passkey', passkeyTransactionRoutes);
 
 /**
  * User Routes
@@ -252,10 +238,6 @@ app.use('/api/transfer', transferRoutes);
 
 // ============= 404 HANDLER =============
 
-/**
- * 404 Not Found Handler
- * Must be AFTER all route definitions
- */
 app.use((req: Request, res: Response) => {
   res.status(404).json({
     success: false,
@@ -267,6 +249,8 @@ app.use((req: Request, res: Response) => {
       'GET  /',
       'GET  /api/cors-test',
       'GET  /api/auth',
+      'POST /api/auth/passkey/transaction-verify-options',
+      'POST /api/auth/passkey/transaction-verify',
       'GET  /api/users',
       'GET  /api/invites',
       'GET  /api/wallet',
@@ -280,16 +264,10 @@ app.use((req: Request, res: Response) => {
 
 // ============= ERROR HANDLER =============
 
-/**
- * Global Error Handler
- * Catches all errors and returns standardized response
- * Must be LAST middleware
- */
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('❌ Error:', err.message);
   console.error('Stack:', err.stack);
 
-  // Handle CORS errors specifically
   if (err.message.includes('CORS')) {
     return res.status(403).json({
       success: false,
@@ -326,6 +304,7 @@ app.listen(PORT, () => {
 ║                                                                ║
 ║   📚 API Documentation: ${apiUrl}/api-docs            ║
 ║   🔐 Auth Endpoints:    ${apiUrl}/api/auth            ║
+║   🔑 Passkey Endpoints: ${apiUrl}/api/auth/passkey    ║
 ║   👥 User Endpoints:    ${apiUrl}/api/users           ║
 ║   🎫 Invite Endpoints:  ${apiUrl}/api/invites         ║
 ║   💰 Wallet Endpoints:  ${apiUrl}/api/wallet          ║
@@ -338,6 +317,7 @@ app.listen(PORT, () => {
 ║   ✅ MongoDB Connected                                        ║
 ║   ✅ CORS Enabled                                             ║
 ║   ✅ Swagger Docs Available                                   ║
+║   ✅ Passkey Transaction Verification Active                  ║
 ║   ✅ Lenco Polling Service Started                            ║
 ║                                                                ║
 ║   CORS Origins: ${process.env.CORS_ORIGIN || 'localhost defaults'}

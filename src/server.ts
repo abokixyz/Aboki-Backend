@@ -5,10 +5,11 @@ import cors from 'cors';
 import connectDB from './config/database';
 import swaggerUi from 'swagger-ui-express';
 import swaggerSpec from './config/swagger';
+dotenv.config();
+
 import { startPollingService } from './services/lencoPollingService';
 
 // Load environment variables FIRST
-dotenv.config();
 
 // Import routes
 import authRoutes from './routes/authRoutes';

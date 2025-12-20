@@ -498,14 +498,34 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
 
     logTransaction('OFFRAMP INITIATED', { transactionReference, status: 'PENDING' });
   } catch (error: any) {
-    console.error('❌ Error initiating offramp:', error);
+    console.error('❌ ERROR INITIATING OFFRAMP');
+    console.error('Error Type:', error.constructor.name);
+    console.error('Error Message:', error.message);
+    console.error('Error Stack:', error.stack);
+    
+    // More detailed error info
+    if (error.response) {
+      console.error('Response Status:', error.response.status);
+      console.error('Response Data:', error.response.data);
+    }
+    
+    if (error.code) {
+      console.error('Error Code:', error.code);
+    }
+    
+    console.error('Full Error Object:', JSON.stringify(error, null, 2));
+    
     res.status(500).json({
       success: false,
       error: 'Failed to initiate offramp',
-      details: error.message
+      details: error.message,
+      errorType: error.constructor.name,
+      // Remove this in production - only for debugging:
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
+
 
 /**
  * Confirm blockchain transaction

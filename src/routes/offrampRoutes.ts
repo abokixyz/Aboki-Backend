@@ -209,7 +209,7 @@ router.post(
   rateLimitMiddleware,
   validateRequest({
     body: {
-      amountUSDC: { type: 'number', required: true, min: 10, max: 5000 },
+      amountUSDC: { type: 'number', required: true, min: 0.1, max: 5000 },
       accountNumber: { type: 'string', required: true },
       bankCode: { type: 'string', required: true }
     }

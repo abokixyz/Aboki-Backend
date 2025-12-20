@@ -185,7 +185,7 @@ export const getRate = async (req: Request, res: Response): Promise<void> => {
  *             properties:
  *               amountUSDC:
  *                 type: number
- *                 minimum: 10
+ *                 minimum: 0.1
  *                 maximum: 5000
  *                 example: 100
  *                 description: Amount to convert (10-5000 USDC)

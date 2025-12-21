@@ -1,4 +1,4 @@
-// ============= src/server.ts (WITH PASSKEY ROUTES) =============
+// ============= src/server.ts (WITH REWARDS & HISTORY ROUTES) =============
 import express, { Application, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -20,6 +20,8 @@ import walletRoutes from './routes/walletRoutes';
 import onrampRoutes from './routes/onrampRoutes';
 import offrampRoutes from './routes/offrampRoutes';
 import transferRoutes from './routes/transferRoutes';
+import historyRoutes from './routes/historyRoutes';
+import rewardRoutes from './routes/rewardRoutes';
 
 // Initialize express app
 const app: Application = express();
@@ -172,6 +174,8 @@ app.get('/', (req: Request, res: Response) => {
       onramp: '/api/onramp',
       offramp: '/api/offramp',
       transfer: '/api/transfer',
+      history: '/api/history',
+      rewards: '/api/rewards',
       docs: '/api-docs'
     }
   });
@@ -237,6 +241,18 @@ app.use('/api/offramp', offrampRoutes);
  */
 app.use('/api/transfer', transferRoutes);
 
+/**
+ * History Routes (Unified transaction history)
+ * @route /api/history
+ */
+app.use('/api/history', historyRoutes);
+
+/**
+ * Reward Routes (Points system & tracking)
+ * @route /api/rewards
+ */
+app.use('/api/rewards', rewardRoutes);
+
 // ============= 404 HANDLER =============
 
 app.use((req: Request, res: Response) => {
@@ -258,6 +274,19 @@ app.use((req: Request, res: Response) => {
       'GET  /api/onramp',
       'GET  /api/offramp',
       'GET  /api/transfer',
+      'GET  /api/history',
+      'GET  /api/history/unified',
+      'GET  /api/history/onramp',
+      'GET  /api/history/offramp',
+      'GET  /api/history/transfer',
+      'GET  /api/history/stats',
+      'GET  /api/rewards',
+      'GET  /api/rewards/my-points',
+      'GET  /api/rewards/my-history',
+      'GET  /api/rewards/referral-info',
+      'GET  /api/rewards/leaderboard',
+      'GET  /api/rewards/rules',
+      'GET  /api/rewards/stats',
       'GET  /api-docs'
     ]
   });
@@ -312,6 +341,8 @@ app.listen(PORT, () => {
 ║   💳 Onramp Endpoints:  ${apiUrl}/api/onramp          ║
 ║   💸 Offramp Endpoints: ${apiUrl}/api/offramp         ║
 ║   🔄 Transfer Endpoints: ${apiUrl}/api/transfer        ║
+║   📊 History Endpoints:  ${apiUrl}/api/history         ║
+║   🎁 Rewards Endpoints:  ${apiUrl}/api/rewards         ║
 ║   🧪 CORS Test:         ${apiUrl}/api/cors-test       ║
 ║                                                                ║
 ║   ✅ All Routes Registered                                    ║
@@ -320,6 +351,8 @@ app.listen(PORT, () => {
 ║   ✅ Swagger Docs Available                                   ║
 ║   ✅ Passkey Transaction Verification Active                  ║
 ║   ✅ Lenco Polling Service Started                            ║
+║   ✅ History Routes Registered                                ║
+║   ✅ Reward Points System Active                              ║
 ║                                                                ║
 ║   CORS Origins: ${process.env.CORS_ORIGIN || 'localhost defaults'}
 ║                                                                ║

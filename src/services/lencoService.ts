@@ -1,10 +1,10 @@
-// ============= src/services/lencoService.ts =============
+// ============= src/services/lencoService.ts (COMPLETE FIXED VERSION) =============
 /**
- * Lenco Service - FIXED VERSION
+ * Lenco Service - CORRECTED FOR ACTUAL API
  * 
  * Handles all Lenco integrations:
- * - Account verification via /v1/resolve endpoint
- * - Money transfers to bank accounts
+ * - Account verification via /resolve endpoint
+ * - Money transfers to bank accounts via /transfer endpoint
  * - Webhook signature verification
  * - Bank list management
  * - Transfer status tracking
@@ -66,13 +66,31 @@ interface TransferResult {
   message?: string;
 }
 
+// ✅ FIXED: Updated to match actual Lenco API response
 interface LencoTransferResponse {
-  transactionReference: string;
+  id: string;  // ✅ Added: Lenco returns 'id' for transactions
+  transactionReference?: string;
   reference?: string;
-  status: string;
+  status: string;  // "pending" | "successful" | "failed" | "declined" | "queued" | "created"
   amount: number;
-  recipientAccount: string;
-  recipientBank: string;
+  fee?: number;
+  narration?: string;
+  type?: string;
+  initiatedAt?: string;
+  completedAt?: string;
+  failedAt?: string;
+  reasonForFailure?: string;
+  clientReference?: string;
+  nipSessionId?: string;
+  accountId?: string;
+  details?: {
+    accountName?: string;
+    accountNumber?: string;
+    bank?: {
+      code: string;
+      name: string;
+    };
+  };
 }
 
 // ============= LENCO SERVICE CLASS =============
@@ -82,6 +100,7 @@ class LencoService {
   private isConfigured: boolean;
   private baseURL: string;
   private apiKey: string = '';
+  private accountId: string = '';
 
   constructor() {
     // Get API key from environment - support both naming conventions
@@ -99,16 +118,30 @@ class LencoService {
       this.apiKey = this.apiKey.slice(0, -1);
     }
 
+    // Get Lenco account ID
+    this.accountId = (process.env.LENCO_ACCOUNT_ID || '').trim();
+    if (this.accountId.startsWith('"') || this.accountId.startsWith("'")) {
+      this.accountId = this.accountId.slice(1);
+    }
+    if (this.accountId.endsWith('"') || this.accountId.endsWith("'")) {
+      this.accountId = this.accountId.slice(0, -1);
+    }
+
     this.baseURL = (
       process.env.LENCO_BASE_URL || 
       process.env.LENCO_API_BASE_URL || 
       'https://api.lenco.co/access/v1'
     ).trim();
 
-    this.isConfigured = !!this.apiKey;
+    this.isConfigured = !!this.apiKey && !!this.accountId;
 
+    if (!this.apiKey) {
+      console.warn('⚠️  Lenco API not configured - LENCO_API_KEY missing');
+    }
+    if (!this.accountId) {
+      console.warn('⚠️  Lenco Account ID not configured - LENCO_ACCOUNT_ID missing');
+    }
     if (!this.isConfigured) {
-      console.warn('⚠️  Lenco API not configured - LENCO_API_KEY or LENCO_SECRET_KEY missing');
       console.warn('⚠️  Lenco service will be unavailable until configured');
     } else {
       // Initialize axios client with proper configuration
@@ -129,20 +162,25 @@ class LencoService {
           if (error.response?.status === 401) {
             console.error('❌ Lenco API Authentication failed (401) - Check your API key');
           }
+          if (error.response?.status === 404) {
+            console.error('❌ Lenco API endpoint not found (404)');
+            console.error(`   URL: ${error.config?.baseURL}${error.config?.url}`);
+          }
           return Promise.reject(error);
         }
       );
 
       console.log('🏦 Lenco service initialized');
       console.log('- Base URL:', this.baseURL);
-      console.log('- API Key configured:', `${this.apiKey.substring(0, 10)}...`);
+      console.log('- API Key:', `${this.apiKey.substring(0, 10)}...`);
+      console.log('- Account ID:', this.accountId);
     }
   }
 
   // Helper to check if service can be used
   private ensureConfigured(): void {
     if (!this.isConfigured || !this.apiClient) {
-      throw new Error('Lenco API not configured. Please set LENCO_API_KEY in environment variables.');
+      throw new Error('Lenco API not configured. Please set LENCO_API_KEY and LENCO_ACCOUNT_ID in environment variables.');
     }
   }
 
@@ -233,7 +271,8 @@ class LencoService {
   }
 
   /**
-   * Transfer funds to a bank account (OFFRAMP Settlement)
+   * ✅ FIXED: Transfer funds to a bank account (OFFRAMP Settlement)
+   * Using correct /transfer endpoint with proper payload
    */
   async transferFunds(params: TransferParams): Promise<TransferResult> {
     this.ensureConfigured();
@@ -243,18 +282,28 @@ class LencoService {
       console.log(`- Recipient: ${params.recipientAccount} (${params.recipientBankCode})`);
       console.log(`- Amount: ₦${params.amount.toLocaleString()}`);
       console.log(`- Reference: ${params.reference}`);
+      console.log(`- Account ID: ${this.accountId}`);
+
+      // ✅ FIXED: Correct payload format for Lenco /transfer endpoint
+      const payload = {
+        accountId: this.accountId,  // Your Lenco account to debit from
+        accountNumber: params.recipientAccount,
+        bankCode: params.recipientBankCode,
+        amount: Math.floor(params.amount), // Must be integer
+        narration: params.narration,
+        reference: params.reference,
+        // Optional: saveRecipient: false
+      };
+
+      console.log('📤 Request payload:', JSON.stringify(payload, null, 2));
 
       const response = await this.apiClient!.post<LencoResponse<LencoTransferResponse>>(
-        '/transfers',
-        {
-          destinationAccountNumber: params.recipientAccount,
-          destinationBankCode: params.recipientBankCode,
-          amount: params.amount,
-          narration: params.narration,
-          reference: params.reference,
-          beneficiaryName: params.recipientName
-        }
+        '/transfer',  // ✅ FIXED: /transfer (singular, not /transfers)
+        payload
       );
+
+      console.log('📥 Response status:', response.status);
+      console.log('📥 Response data:', JSON.stringify(response.data, null, 2));
 
       if (!response.data.status) {
         console.error('❌ Transfer failed:', response.data.message);
@@ -266,16 +315,17 @@ class LencoService {
       }
 
       const transferData = response.data.data;
-      console.log('✅ Transfer successful');
-      console.log(`- Transaction Reference: ${transferData.transactionReference}`);
+      console.log('✅ Transfer queued successfully');
+      console.log(`- Transaction ID: ${transferData.id}`);
       console.log(`- Status: ${transferData.status}`);
+      console.log(`- Reference: ${transferData.clientReference || transferData.reference}`);
 
       return {
         success: true,
-        reference: transferData.transactionReference,
-        transferId: transferData.reference || transferData.transactionReference,
+        reference: params.reference,
+        transferId: transferData.id,  // ✅ FIXED: Use 'id' field
         status: transferData.status,
-        message: 'Transfer completed successfully'
+        message: 'Transfer initiated successfully'
       };
 
     } catch (error: unknown) {
@@ -284,6 +334,18 @@ class LencoService {
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
         const message = error.response?.data?.message;
+        
+        console.error('❌ HTTP Status:', status);
+        console.error('❌ Error Message:', message);
+        console.error('❌ Error Response:', JSON.stringify(error.response?.data, null, 2));
+        
+        if (status === 404) {
+          return {
+            success: false,
+            reference: params.reference,
+            message: 'Lenco API endpoint not found. Check base URL and endpoint path.'
+          };
+        }
         
         if (status === 400) {
           return {
@@ -349,9 +411,9 @@ class LencoService {
   }
 
   /**
-   * Check transfer status
+   * ✅ FIXED: Check transfer status using transaction ID
    */
-  async getTransferStatus(reference: string): Promise<{
+  async getTransferStatus(transactionId: string): Promise<{
     success: boolean;
     status?: string;
     amount?: number;
@@ -362,10 +424,11 @@ class LencoService {
     this.ensureConfigured();
     
     try {
-      console.log(`🔍 Checking transfer status: ${reference}`);
+      console.log(`🔍 Checking transfer status: ${transactionId}`);
 
+      // Use /transactions/:id endpoint to check status
       const response = await this.apiClient!.get<LencoResponse<LencoTransferResponse>>(
-        `/transfers/${reference}`
+        `/transactions/${transactionId}`
       );
 
       if (!response.data.status) {
@@ -376,14 +439,15 @@ class LencoService {
         };
       }
 
-      console.log(`✅ Transfer status: ${response.data.data.status}`);
+      const data = response.data.data;
+      console.log(`✅ Transfer status: ${data.status}`);
       
       return {
         success: true,
-        status: response.data.data.status,
-        amount: response.data.data.amount,
+        status: data.status,
+        amount: data.amount,
         currency: 'NGN',
-        details: response.data.data
+        details: data
       };
 
     } catch (error: unknown) {
@@ -453,7 +517,8 @@ class LencoService {
     return {
       configured: this.isConfigured,
       baseURL: this.baseURL,
-      hasApiKey: !!this.apiKey
+      hasApiKey: !!this.apiKey,
+      hasAccountId: !!this.accountId
     };
   }
 

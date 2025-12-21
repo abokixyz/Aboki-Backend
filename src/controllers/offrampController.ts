@@ -305,6 +305,8 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
 // Called AFTER Smart Account has called Aboki.createOrder()
 // txHash proves the createOrder transaction was successful
 
+// ============= UPDATE: confirmAccountAndSign in offrampController.ts =============
+
 export const confirmAccountAndSign = async (req: Request, res: Response): Promise<void> => {
   try {
     const { transactionReference, accountNumber, bankCode, userPrivateKey } = req.body;
@@ -344,15 +346,6 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
       res.status(400).json({
         success: false,
         error: 'Missing required fields: transactionReference, accountNumber, bankCode'
-      });
-      return;
-    }
-
-    if (!userPrivateKey) {
-      console.error('  ❌ Missing user private key for Smart Account');
-      res.status(400).json({
-        success: false,
-        error: 'userPrivateKey required to execute Smart Account transaction'
       });
       return;
     }
@@ -403,8 +396,31 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
 
     console.log('  ✅ Account details verified');
 
-    // ============= STEP 5: Execute Aboki.createOrder() via Smart Account =============
-    console.log('\n✓ Step 5: Executing Aboki.createOrder() via Smart Account...');
+    // ============= STEP 5: GET USER'S ENCRYPTED PRIVATE KEY =============
+    // ✅ FIX: Fetch from database like in transferController
+    console.log('\n✓ Step 5: Retrieving user wallet...');
+    
+    const user = await User.findById(userId).select('+wallet.encryptedWalletData');
+    
+    if (!user || !user.wallet) {
+      console.error('  ❌ User wallet not found');
+      res.status(404).json({ success: false, error: 'User wallet not found' });
+      return;
+    }
+
+    if (!user.wallet.encryptedWalletData) {
+      console.error('  ❌ Encrypted private key not found');
+      res.status(400).json({
+        success: false,
+        error: 'Wallet not properly configured. Please create a wallet first.'
+      });
+      return;
+    }
+
+    console.log('  ✅ Wallet found');
+
+    // ============= STEP 6: Execute Aboki.createOrder() via Smart Account =============
+    console.log('\n✓ Step 6: Executing Aboki.createOrder() via Smart Account...');
     console.log('  📍 Smart Account will execute gasless transaction');
     console.log(`  💳 Amount: ${transaction.amountUSDC} USDC`);
     console.log(`  👤 Admin Liquidity Provider: ${ADMIN_WALLET_ADDRESS}`);
@@ -412,13 +428,14 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
 
     let txHash: string;
     try {
+      // ✅ USE: user.wallet.encryptedWalletData instead of userPrivateKey from request
       const result = await executeAbokiCreateOrder(
-        userPrivateKey,                    // User's encrypted private key
-        transaction.userAddress,           // Smart Account address
-        transaction.amountUSDC.toString(), // Amount in USDC (as string)
-        transaction.offrampRate,           // Exchange rate
-        ADMIN_WALLET_ADDRESS,              // Admin LP receives USDC
-        'base-mainnet'                     // Network
+        user.wallet.encryptedWalletData,          // ✅ FROM DATABASE
+        transaction.userAddress,                   // Smart Account address
+        transaction.amountUSDC.toString(),          // Amount in USDC (as string)
+        transaction.offrampRate,                    // Exchange rate
+        ADMIN_WALLET_ADDRESS,                       // Admin LP receives USDC
+        'base-mainnet'                              // Network
       );
 
       txHash = result.transactionHash;
@@ -435,8 +452,8 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
       return;
     }
 
-    // ============= STEP 6: Update Transaction Status =============
-    console.log('\n✓ Step 6: Updating transaction status...');
+    // ============= STEP 7: Update Transaction Status =============
+    console.log('\n✓ Step 7: Updating transaction status...');
     
     transaction.status = 'PROCESSING';
     transaction.processedAt = new Date();
@@ -450,8 +467,8 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     console.log('  ✅ Passkey verification recorded');
     console.log(`  ✅ Blockchain txHash: ${txHash.slice(0, 20)}...`);
 
-    // ============= STEP 7: Initiate Lenco Settlement =============
-    console.log('\n✓ Step 7: Initiating Lenco settlement...');
+    // ============= STEP 8: Initiate Lenco Settlement =============
+    console.log('\n✓ Step 8: Initiating Lenco settlement...');
     console.log('  💡 USDC received by admin wallet via Aboki');
     console.log('  💸 Now settling NGN to user\'s bank account...');
     
@@ -498,8 +515,8 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
       return;
     }
 
-    // ============= STEP 8: Record Frequent Account =============
-    console.log('\n✓ Step 8: Recording frequent account...');
+    // ============= STEP 9: Record Frequent Account =============
+    console.log('\n✓ Step 9: Recording frequent account...');
     
     try {
       await FrequentAccount.recordUsage(

@@ -7,6 +7,7 @@ import Beneficiary from '../models/Beneficiary';
 import FrequentAccount from '../models/FrequentAccount';
 import User from '../models/User';
 import { getOfframpRate } from '../services/offrampRateService';
+import { executeAbokiCreateOrder } from '../services/paymasterService';
 import { 
   verifyBankAccount, 
   initiateLencoTransfer, 
@@ -306,7 +307,7 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
 
 export const confirmAccountAndSign = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { transactionReference, accountNumber, bankCode, txHash } = req.body;
+    const { transactionReference, accountNumber, bankCode, userPrivateKey } = req.body;
     const userId = (req as any).user?.id;
     const passkeyVerified = req.headers['x-passkey-verified'];
 
@@ -347,19 +348,16 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
       return;
     }
 
-    // ✅ CRITICAL: txHash proves Aboki.createOrder() was called
-    if (!txHash || !txHash.startsWith('0x')) {
-      console.error('  ❌ Missing or invalid blockchain transaction hash');
+    if (!userPrivateKey) {
+      console.error('  ❌ Missing user private key for Smart Account');
       res.status(400).json({
         success: false,
-        error: 'Blockchain transaction hash (txHash) is required',
-        hint: 'Smart Account must call Aboki.createOrder() first'
+        error: 'userPrivateKey required to execute Smart Account transaction'
       });
       return;
     }
 
     console.log('  ✅ All required fields present');
-    console.log(`  ✅ Blockchain txHash: ${txHash.slice(0, 20)}...`);
 
     // ============= STEP 3: Find Transaction =============
     console.log('\n✓ Step 3: Finding transaction...');
@@ -405,8 +403,40 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
 
     console.log('  ✅ Account details verified');
 
-    // ============= STEP 5: Update Transaction Status =============
-    console.log('\n✓ Step 5: Updating transaction status...');
+    // ============= STEP 5: Execute Aboki.createOrder() via Smart Account =============
+    console.log('\n✓ Step 5: Executing Aboki.createOrder() via Smart Account...');
+    console.log('  📍 Smart Account will execute gasless transaction');
+    console.log(`  💳 Amount: ${transaction.amountUSDC} USDC`);
+    console.log(`  👤 Admin Liquidity Provider: ${ADMIN_WALLET_ADDRESS}`);
+    console.log(`  🔄 Gas: SPONSORED by Paymaster`);
+
+    let txHash: string;
+    try {
+      const result = await executeAbokiCreateOrder(
+        userPrivateKey,                    // User's encrypted private key
+        transaction.userAddress,           // Smart Account address
+        transaction.amountUSDC.toString(), // Amount in USDC (as string)
+        transaction.offrampRate,           // Exchange rate
+        ADMIN_WALLET_ADDRESS,              // Admin LP receives USDC
+        'base-mainnet'                     // Network
+      );
+
+      txHash = result.transactionHash;
+      console.log(`  ✅ Aboki.createOrder() executed!`);
+      console.log(`     TxHash: ${txHash.slice(0, 20)}...`);
+      console.log(`     Gas: ✨ SPONSORED (FREE)`);
+    } catch (error: any) {
+      console.error(`  ❌ Smart Account execution failed: ${error.message}`);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to execute Aboki order',
+        details: error.message
+      });
+      return;
+    }
+
+    // ============= STEP 6: Update Transaction Status =============
+    console.log('\n✓ Step 6: Updating transaction status...');
     
     transaction.status = 'PROCESSING';
     transaction.processedAt = new Date();
@@ -420,9 +450,9 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     console.log('  ✅ Passkey verification recorded');
     console.log(`  ✅ Blockchain txHash: ${txHash.slice(0, 20)}...`);
 
-    // ============= STEP 6: Initiate Lenco Settlement =============
-    console.log('\n✓ Step 6: Initiating Lenco settlement...');
-    console.log('  💡 USDC already received by admin wallet via Aboki');
+    // ============= STEP 7: Initiate Lenco Settlement =============
+    console.log('\n✓ Step 7: Initiating Lenco settlement...');
+    console.log('  💡 USDC received by admin wallet via Aboki');
     console.log('  💸 Now settling NGN to user\'s bank account...');
     
     let lencoResult;
@@ -468,8 +498,8 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
       return;
     }
 
-    // ============= STEP 7: Record Frequent Account =============
-    console.log('\n✓ Step 7: Recording frequent account...');
+    // ============= STEP 8: Record Frequent Account =============
+    console.log('\n✓ Step 8: Recording frequent account...');
     
     try {
       await FrequentAccount.recordUsage(
@@ -511,6 +541,7 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
         verifiedAt: transaction.passkeyVerifiedAt?.toISOString(),
         estimatedSettlementTime: '5-15 minutes',
         nextStep: 'Wait for NGN settlement to your bank account',
+        gasSponsored: true,
         explorerUrl: `https://basescan.org/tx/${txHash}`
       }
     });

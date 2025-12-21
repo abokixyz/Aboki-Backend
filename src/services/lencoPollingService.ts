@@ -1,309 +1,419 @@
 // ============= src/services/lencoPollingService.ts =============
 /**
- * Lenco Polling Service
+ * Lenco Status Polling Service
  * 
- * Polls Lenco API for pending offramp transactions since webhooks are unavailable.
- * 
- * ADVANTAGES:
- * - No webhook setup required
- * - Self-contained polling logic
- * - Automatic retry on failures
- * - Handles offline scenarios
- * 
- * LIMITATIONS:
- * - Slight delay before status updates (polling interval)
- * - More API calls to Lenco
- * 
- * SOLUTION: Poll every 30 seconds for pending/settling transactions
+ * Polls Lenco for transfer status using the CORRECT reference
+ * Issue: Must use lencoReference (transfer ID), NOT offramp transaction reference
  */
 
+import axios from 'axios';
 import OfframpTransaction from '../models/OfframpTransaction';
-import { getTransferStatus } from './lencoService';
 
-// Polling configuration
-const POLLING_INTERVAL = 30 * 1000; // Poll every 30 seconds
-const MAX_POLL_ATTEMPTS = 720; // Stop polling after 6 hours (720 * 30s)
-const BATCH_SIZE = 10; // Process 10 transactions at a time
+const LENCO_API_BASE = 'https://api.lenco.co/access/v1';
+const LENCO_API_KEY = process.env.LENCO_API_KEY || '';
+const LENCO_API_SECRET = process.env.LENCO_API_SECRET || '';
 
-// Track polling state
-let pollingActive = false;
-let pollingInterval: NodeJS.Timeout | null = null;
-
-/**
- * Start the Lenco polling service
- * Call this once on server startup
- */
-export async function startPollingService(): Promise<void> {
-  if (pollingActive) {
-    console.log('⚠️ Lenco polling service already running');
-    return;
-  }
-
-  pollingActive = true;
-  console.log('✅ Starting Lenco polling service...');
-  console.log(`   Polling interval: ${POLLING_INTERVAL / 1000} seconds`);
-  console.log(`   Batch size: ${BATCH_SIZE} transactions`);
-
-  // Run first poll immediately
-  await pollPendingTransactions();
-
-  // Schedule regular polling
-  pollingInterval = setInterval(async () => {
-    try {
-      await pollPendingTransactions();
-    } catch (error: any) {
-      console.error('❌ Polling error:', error.message);
-    }
-  }, POLLING_INTERVAL);
-
-  console.log('🚀 Lenco polling service started');
+if (!LENCO_API_KEY) {
+  console.warn('⚠️ LENCO_API_KEY not set in environment');
 }
 
 /**
- * Stop the polling service
- */
-export function stopPollingService(): void {
-  if (pollingInterval) {
-    clearInterval(pollingInterval);
-    pollingInterval = null;
-  }
-  pollingActive = false;
-  console.log('⛔ Lenco polling service stopped');
-}
-
-/**
- * Poll pending/settling transactions
+ * Get Lenco transfer status using CORRECT reference
  * 
- * Status progression:
- * PENDING → (user confirms) → PROCESSING → (Lenco settles) → SETTLING → COMPLETED/FAILED
+ * ✅ CORRECT: Use lencoReference (the transfer ID from Lenco)
+ * ❌ WRONG: Use offramp transactionReference
  */
-async function pollPendingTransactions(): Promise<void> {
-  try {
-    // Find all PROCESSING and SETTLING transactions
-    const pendingTransactions = await OfframpTransaction.find({
-      status: { $in: ['PROCESSING', 'SETTLING'] },
-      lencoReference: { $exists: true, $ne: null }
-    })
-      .sort({ processedAt: 1 })
-      .limit(BATCH_SIZE);
-
-    if (pendingTransactions.length === 0) {
-      // Only log if there are any transactions in the system
-      const totalCount = await OfframpTransaction.countDocuments({});
-      if (totalCount > 0) {
-        console.log(`⏳ No pending transactions to poll (${totalCount} total)`);
-      }
-      return;
-    }
-
-    console.log(`\n🔄 Polling ${pendingTransactions.length} pending Lenco transfers...`);
-
-    let updated = 0;
-    let failed = 0;
-
-    for (const transaction of pendingTransactions) {
-      try {
-        await pollSingleTransaction(transaction);
-        updated++;
-      } catch (error: any) {
-        console.error(`  ❌ Error polling ${transaction.transactionReference}: ${error.message}`);
-        failed++;
-      }
-    }
-
-    console.log(`✅ Polling complete: ${updated} updated, ${failed} failed`);
-
-  } catch (error: any) {
-    console.error('❌ Error polling pending transactions:', error.message);
-  }
-}
-
-/**
- * Poll a single transaction status
- */
-async function pollSingleTransaction(transaction: any): Promise<void> {
-  const { transactionReference, lencoReference, status } = transaction;
-
-  try {
-    console.log(`  📊 Checking: ${transactionReference} (${lencoReference})`);
-
-    // Get current status from Lenco
-    const statusResult = await getTransferStatus(lencoReference);
-
-    if (!statusResult.success) {
-      console.error(`     ❌ Failed to fetch status: ${statusResult.error}`);
-      return;
-    }
-
-    const lencoStatus = statusResult.status?.toLowerCase();
-
-    console.log(`     Lenco Status: ${lencoStatus}`);
-
-    // Handle different Lenco status values
-    if (lencoStatus === 'successful' || lencoStatus === 'completed') {
-      // Transfer succeeded
-      if (transaction.status !== 'COMPLETED') {
-        console.log(`     ✅ COMPLETED - User received ₦${transaction.amountNGN.toFixed(2)}`);
-        
-        transaction.status = 'COMPLETED';
-        transaction.completedAt = new Date();
-        transaction.lencoStatus = lencoStatus;
-        
-        await transaction.save();
-
-        // Send notification to user (if you have a notification service)
-        // await notifyUser(transaction.userId, {
-        //   type: 'offramp_completed',
-        //   amount: transaction.amountNGN,
-        //   status: 'COMPLETED'
-        // });
-      }
-
-    } else if (lencoStatus === 'failed' || lencoStatus === 'rejected') {
-      // Transfer failed
-      if (transaction.status !== 'FAILED') {
-        console.log(`     ❌ FAILED - Settlement could not be completed`);
-        
-        transaction.status = 'FAILED';
-        transaction.completedAt = new Date();
-        transaction.errorCode = 'LENCO_FAILED';
-        transaction.errorMessage = statusResult.status || 'Lenco settlement failed';
-        transaction.lencoStatus = lencoStatus;
-        
-        await transaction.save();
-
-        // Send failure notification
-        // await notifyUser(transaction.userId, {
-        //   type: 'offramp_failed',
-        //   reason: statusResult.status
-        // });
-      }
-
-    } else if (lencoStatus === 'pending' || lencoStatus === 'processing') {
-      // Still processing - update lenco status but keep transaction status
-      console.log(`     ⏳ Still settling...`);
-      
-      transaction.lencoStatus = lencoStatus;
-      transaction.polledAt = new Date();
-      
-      await transaction.save();
-
-    } else {
-      console.log(`     ℹ️ Unknown status: ${lencoStatus}`);
-      transaction.lencoStatus = lencoStatus;
-      transaction.polledAt = new Date();
-      
-      await transaction.save();
-    }
-
-  } catch (error: any) {
-    console.error(`     ❌ Polling error: ${error.message}`);
-    
-    // Increment poll attempt counter
-    if (!transaction.pollAttempts) {
-      transaction.pollAttempts = 0;
-    }
-    transaction.pollAttempts += 1;
-    transaction.lastPolledAt = new Date();
-
-    // Stop polling after too many failed attempts
-    if (transaction.pollAttempts > MAX_POLL_ATTEMPTS) {
-      console.warn(`     ⚠️ Max polling attempts reached (${MAX_POLL_ATTEMPTS}), marking as FAILED`);
-      transaction.status = 'FAILED';
-      transaction.errorCode = 'POLLING_TIMEOUT';
-      transaction.errorMessage = 'Unable to confirm settlement status after 6 hours';
-      transaction.completedAt = new Date();
-    }
-
-    await transaction.save();
-  }
-}
-
-/**
- * Manually trigger polling (useful for testing)
- */
-export async function triggerManualPolling(): Promise<{
+export async function getLencoTransferStatus(
+  lencoTransferId: string  // ✅ This is the ID returned from initiateLencoTransfer
+): Promise<{
   success: boolean;
-  transactionsPolled: number;
+  status: 'pending' | 'successful' | 'failed' | 'declined' | null;
   message: string;
+  data?: any;
+  error?: string;
 }> {
   try {
-    const pendingCount = await OfframpTransaction.countDocuments({
-      status: { $in: ['PROCESSING', 'SETTLING'] }
+    if (!lencoTransferId) {
+      return {
+        success: false,
+        status: null,
+        message: 'No Lenco transfer ID provided',
+        error: 'Missing lencoTransferId'
+      };
+    }
+
+    console.log(`\n🔍 Checking Lenco transfer status...`);
+    console.log(`   Transfer ID: ${lencoTransferId}`);
+
+    // ✅ CORRECT ENDPOINT: Use transfer ID, not transaction reference
+    const url = `${LENCO_API_BASE}/transactions/${lencoTransferId}`;
+
+    console.log(`   Endpoint: ${url}`);
+
+    const response = await axios.get(url, {
+      headers: {
+        'Authorization': `Bearer ${LENCO_API_KEY}`,
+        'Accept': 'application/json'
+      },
+      timeout: 10000
     });
 
-    console.log(`\n🔄 MANUAL POLLING TRIGGERED`);
-    console.log(`   Found ${pendingCount} pending transactions`);
+    if (!response.data || !response.data.status) {
+      console.log(`   ⚠️ Unexpected response format`);
+      return {
+        success: false,
+        status: null,
+        message: 'Invalid response from Lenco',
+        data: response.data
+      };
+    }
 
-    await pollPendingTransactions();
+    const status = response.data.status.toLowerCase();
+    const validStatuses = ['pending', 'successful', 'failed', 'declined'];
+    
+    if (!validStatuses.includes(status)) {
+      console.log(`   ⚠️ Unknown status: ${status}`);
+      return {
+        success: false,
+        status: null,
+        message: `Unknown transfer status: ${status}`,
+        data: response.data
+      };
+    }
+
+    console.log(`   ✅ Status: ${status.toUpperCase()}`);
 
     return {
       success: true,
-      transactionsPolled: pendingCount,
-      message: 'Manual polling completed'
+      status: status as 'pending' | 'successful' | 'failed' | 'declined',
+      message: `Transfer is ${status}`,
+      data: response.data
     };
-
   } catch (error: any) {
-    console.error('❌ Manual polling error:', error);
+    const status = error.response?.status;
+    const message = error.response?.data?.message || error.message;
+
+    // ❌ This is the error you're seeing - 404 means wrong reference
+    if (status === 404) {
+      console.error(`   ❌ Lenco transfer not found (404)`);
+      console.error(`   📌 Make sure you're using the Lenco transfer ID, not the offramp reference`);
+      
+      return {
+        success: false,
+        status: null,
+        message: 'Lenco transfer not found - verify reference is correct',
+        error: `404 Not Found: ${message}`
+      };
+    }
+
+    console.error(`   ❌ Error: ${message}`);
     return {
       success: false,
-      transactionsPolled: 0,
+      status: null,
+      message: `Failed to check Lenco status`,
+      error: message
+    };
+  }
+}
+
+/**
+ * Poll Lenco status every 5 seconds until completion (max 30 attempts = 2.5 minutes)
+ */
+export async function pollLencoUntilComplete(
+  lencoTransferId: string,
+  maxAttempts: number = 30,
+  intervalSeconds: number = 5
+): Promise<{
+  completed: boolean;
+  finalStatus: 'pending' | 'successful' | 'failed' | 'declined' | null;
+  attempts: number;
+  data?: any;
+}> {
+  let attempts = 0;
+  let lastStatus: 'pending' | 'successful' | 'failed' | 'declined' | null = null;
+
+  console.log(`\n📋 Starting Lenco polling...`);
+  console.log(`   Transfer ID: ${lencoTransferId}`);
+  console.log(`   Max attempts: ${maxAttempts}`);
+  console.log(`   Interval: ${intervalSeconds}s`);
+
+  while (attempts < maxAttempts) {
+    attempts++;
+    console.log(`\n   [Attempt ${attempts}/${maxAttempts}]`);
+
+    const result = await getLencoTransferStatus(lencoTransferId);
+    lastStatus = result.status;
+
+    if (!result.success || !result.status) {
+      console.log(`   ⚠️ Check failed: ${result.error}`);
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, intervalSeconds * 1000));
+      continue;
+    }
+
+    if (result.status === 'pending') {
+      console.log(`   ⏳ Still pending... waiting ${intervalSeconds}s`);
+      await new Promise(resolve => setTimeout(resolve, intervalSeconds * 1000));
+      continue;
+    }
+
+    // Transfer completed (successful, failed, or declined)
+    console.log(`\n✅ Polling complete!`);
+    console.log(`   Final status: ${result.status.toUpperCase()}`);
+    console.log(`   Attempts: ${attempts}`);
+
+    return {
+      completed: true,
+      finalStatus: result.status,
+      attempts,
+      data: result.data
+    };
+  }
+
+  // Max attempts reached
+  console.log(`\n⚠️ Polling timed out after ${attempts} attempts`);
+  return {
+    completed: false,
+    finalStatus: lastStatus,
+    attempts,
+    data: null
+  };
+}
+
+/**
+ * Background polling service - runs on server startup
+ * Monitors all PENDING/SETTLING offramp transactions and polls Lenco
+ * 
+ * Runs every 10 seconds and checks for transactions needing status updates
+ */
+export function startPollingService(): void {
+  console.log('🚀 Starting Lenco Polling Service...');
+  
+  // Poll every 10 seconds
+  const POLLING_INTERVAL = 10000;
+
+  setInterval(async () => {
+    try {
+      // Find all active offramp transactions
+      const activeTransactions = await OfframpTransaction.find({
+        status: { $in: ['PROCESSING', 'SETTLING'] },
+        lencoReference: { $exists: true, $ne: null }
+      }).limit(10); // Process max 10 at a time
+
+      if (activeTransactions.length === 0) {
+        return; // No transactions to poll
+      }
+
+      console.log(`\n🔄 Polling Lenco for ${activeTransactions.length} transactions...`);
+
+      // Poll each transaction
+      for (const transaction of activeTransactions) {
+        try {
+          const result = await getLencoTransferStatus(transaction.lencoReference!);
+
+          if (!result.success || !result.status) {
+            continue; // Skip if we can't get status
+          }
+
+          // Update transaction based on Lenco status
+          let newStatus = transaction.status;
+          let shouldSave = false;
+
+          switch (result.status) {
+            case 'successful':
+              newStatus = 'COMPLETED';
+              transaction.completedAt = new Date();
+              shouldSave = true;
+              console.log(`   ✅ ${transaction.transactionReference}: COMPLETED`);
+              break;
+            case 'failed':
+            case 'declined':
+              newStatus = 'FAILED';
+              transaction.completedAt = new Date();
+              transaction.errorCode = 'LENCO_FAILED';
+              transaction.errorMessage = `Lenco settlement ${result.status}`;
+              shouldSave = true;
+              console.log(`   ❌ ${transaction.transactionReference}: FAILED`);
+              break;
+            // 'pending' - keep polling
+          }
+
+          if (shouldSave) {
+            transaction.status = newStatus;
+            await transaction.save();
+          }
+        } catch (txError: any) {
+          console.error(`   ⚠️ Error polling ${transaction.transactionReference}:`, txError.message);
+        }
+      }
+    } catch (error: any) {
+      console.error('❌ Polling service error:', error.message);
+    }
+  }, POLLING_INTERVAL);
+
+  console.log('✅ Lenco Polling Service started (interval: 10s)');
+}
+
+/**
+ * Poll a specific transaction immediately (for testing or manual triggers)
+ */
+export async function pollSpecificTransaction(
+  offrampTransactionId: string
+): Promise<{
+  success: boolean;
+  message: string;
+  finalStatus?: string;
+}> {
+  try {
+    const transaction = await OfframpTransaction.findById(offrampTransactionId);
+
+    if (!transaction) {
+      return {
+        success: false,
+        message: 'Transaction not found'
+      };
+    }
+
+    if (!transaction.lencoReference) {
+      return {
+        success: false,
+        message: 'No Lenco reference available for polling'
+      };
+    }
+
+    console.log(`\n🚀 Polling specific transaction: ${transaction.transactionReference}`);
+
+    // Poll Lenco every 5 seconds, max 30 attempts (2.5 minutes)
+    const result = await pollLencoUntilComplete(
+      transaction.lencoReference,
+      30,
+      5
+    );
+
+    if (result.completed) {
+      // Update transaction with final status
+      const updateResult = await updateOfframpStatusFromLenco(offrampTransactionId);
+      return {
+        success: true,
+        message: `Polling complete: ${result.finalStatus}`,
+        finalStatus: result.finalStatus || undefined
+      };
+    } else {
+      return {
+        success: false,
+        message: `Polling timed out after ${result.attempts} attempts`,
+        finalStatus: result.finalStatus || undefined
+      };
+    }
+  } catch (error: any) {
+    console.error('❌ Polling error:', error);
+    return {
+      success: false,
       message: error.message
     };
   }
 }
 
 /**
- * Get polling statistics
+ * Background job: Poll Lenco and update offramp transaction status
+ * 
+ * This should be called from a background worker/cron job
  */
-export async function getPollingStats(): Promise<{
-  isRunning: boolean;
-  pollingInterval: number;
-  pendingTransactions: number;
-  settlingTransactions: number;
-  completedToday: number;
-  failedToday: number;
+export async function updateOfframpStatusFromLenco(
+  offrampTransactionId: string
+): Promise<{
+  success: boolean;
+  updated: boolean;
+  newStatus: string;
+  message: string;
 }> {
   try {
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const transaction = await OfframpTransaction.findById(offrampTransactionId);
 
-    const stats = {
-      isRunning: pollingActive,
-      pollingInterval: POLLING_INTERVAL / 1000,
-      pendingTransactions: await OfframpTransaction.countDocuments({
-        status: 'PROCESSING'
-      }),
-      settlingTransactions: await OfframpTransaction.countDocuments({
-        status: 'SETTLING'
-      }),
-      completedToday: await OfframpTransaction.countDocuments({
-        status: 'COMPLETED',
-        completedAt: { $gte: todayStart }
-      }),
-      failedToday: await OfframpTransaction.countDocuments({
-        status: 'FAILED',
-        completedAt: { $gte: todayStart }
-      })
-    };
+    if (!transaction) {
+      return {
+        success: false,
+        updated: false,
+        newStatus: 'NOT_FOUND',
+        message: 'Offramp transaction not found'
+      };
+    }
 
-    return stats;
-  } catch (error: any) {
-    console.error('❌ Error getting polling stats:', error);
+    if (!transaction.lencoReference) {
+      return {
+        success: false,
+        updated: false,
+        newStatus: transaction.status,
+        message: 'No Lenco reference available'
+      };
+    }
+
+    // ✅ CORRECT: Use lencoReference (the Lenco transfer ID)
+    const result = await getLencoTransferStatus(transaction.lencoReference);
+
+    if (!result.success) {
+      return {
+        success: false,
+        updated: false,
+        newStatus: transaction.status,
+        message: result.error || 'Failed to get Lenco status'
+      };
+    }
+
+    // Update transaction based on Lenco status
+    let newStatus = transaction.status;
+
+    switch (result.status) {
+      case 'successful':
+        newStatus = 'COMPLETED';
+        transaction.completedAt = new Date();
+        break;
+      case 'failed':
+      case 'declined':
+        newStatus = 'FAILED';
+        transaction.completedAt = new Date();
+        transaction.errorCode = 'LENCO_FAILED';
+        transaction.errorMessage = `Lenco settlement ${result.status}`;
+        break;
+      case 'pending':
+        newStatus = 'SETTLING';
+        break;
+    }
+
+    // Only update if status changed
+    if (newStatus !== transaction.status) {
+      transaction.status = newStatus;
+      await transaction.save();
+
+      return {
+        success: true,
+        updated: true,
+        newStatus,
+        message: `Status updated from Lenco: ${newStatus}`
+      };
+    }
+
     return {
-      isRunning: pollingActive,
-      pollingInterval: POLLING_INTERVAL / 1000,
-      pendingTransactions: 0,
-      settlingTransactions: 0,
-      completedToday: 0,
-      failedToday: 0
+      success: true,
+      updated: false,
+      newStatus: transaction.status,
+      message: 'Status unchanged'
+    };
+  } catch (error: any) {
+    console.error('❌ Error updating offramp status:', error);
+    return {
+      success: false,
+      updated: false,
+      newStatus: 'ERROR',
+      message: error.message
     };
   }
 }
 
 export default {
   startPollingService,
-  stopPollingService,
-  triggerManualPolling,
-  getPollingStats
+  pollSpecificTransaction,
+  getLencoTransferStatus,
+  pollLencoUntilComplete,
+  updateOfframpStatusFromLenco
 };

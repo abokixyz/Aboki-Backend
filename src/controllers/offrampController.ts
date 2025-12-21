@@ -538,9 +538,21 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     console.log(`Status: ${transaction.status}`);
     console.log('═'.repeat(70) + '\n');
 
+    const successPageParams = new URLSearchParams({
+      txHash: txHash,
+      reference: transactionReference,
+      amountUSDC: transaction.amountUSDC.toString(),
+      amountNGN: transaction.amountNGN.toFixed(2),
+      accountName: transaction.beneficiary.name,
+      bankName: transaction.beneficiary.bankName || ''
+    }).toString();
+    
+    const redirectTo = `/send/bank-success?${successPageParams}`;
+
     res.status(200).json({
-      success: true,
-      message: 'Aboki order confirmed. NGN settlement in progress.',
+        success: true,
+        message: 'Aboki order confirmed. NGN settlement in progress.',
+        redirectTo: redirectTo,  // ← ADD THIS
       data: {
         transactionReference,
         status: transaction.status,

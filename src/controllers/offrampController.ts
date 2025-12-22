@@ -1,4 +1,4 @@
-// ============= src/controllers/offrampController.ts (COMPLETE & FIXED) =============
+// ============= src/controllers/offrampController.ts (UPDATED WITH NEW SERVICES) =============
 
 import { Request, Response } from 'express';
 import crypto from 'crypto';
@@ -8,11 +8,23 @@ import FrequentAccount from '../models/FrequentAccount';
 import User from '../models/User';
 import { getOfframpRate } from '../services/offrampRateService';
 import { executeAbokiCreateOrder } from '../services/paymasterService';
-import { 
-  verifyBankAccount, 
-  initiateLencoTransfer, 
-  verifyWebhookSignature 
+
+// ✅ UPDATE 1: Add new imports (replace old lencoService imports)
+import {
+  verifyBankAccount,
+  getBankName,
 } from '../services/lencoService';
+
+import {
+  createAndInitiateOfframpTransfer,
+  verifyBankAccountForOfframp,
+  getBanksForOfframp
+} from '../services/lencoTransferService';
+
+import {
+  pollSpecificTransaction,
+  updateOfframpStatusFromLenco
+} from '../services/lencoPollingService';
 
 const ADMIN_WALLET_ADDRESS = process.env.ADMIN_WALLET_ADDRESS || '';
 
@@ -67,6 +79,8 @@ export const getRate = async (req: Request, res: Response): Promise<void> => {
 };
 
 // ============= INITIATE OFFRAMP =============
+// ✅ UPDATE 2: This function stays mostly the same - just adds transaction to DB
+// The actual Lenco initiation happens in confirmAccountAndSign
 
 export const initiateOfframp = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -302,10 +316,7 @@ export const initiateOfframp = async (req: Request, res: Response): Promise<void
 };
 
 // ============= CONFIRM ACCOUNT AND SIGN =============
-// Called AFTER Smart Account has called Aboki.createOrder()
-// txHash proves the createOrder transaction was successful
-
-// ============= UPDATE: confirmAccountAndSign in offrampController.ts =============
+// ✅ UPDATE 3: Update Lenco settlement to use new fields and services
 
 export const confirmAccountAndSign = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -397,7 +408,6 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     console.log('  ✅ Account details verified');
 
     // ============= STEP 5: GET USER'S ENCRYPTED PRIVATE KEY =============
-    // ✅ FIX: Fetch from database like in transferController
     console.log('\n✓ Step 5: Retrieving user wallet...');
     
     const user = await User.findById(userId).select('+wallet.encryptedWalletData');
@@ -428,14 +438,13 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
 
     let txHash: string;
     try {
-      // ✅ USE: user.wallet.encryptedWalletData instead of userPrivateKey from request
       const result = await executeAbokiCreateOrder(
-        user.wallet.encryptedWalletData,          // ✅ FROM DATABASE
-        transaction.userAddress,                   // Smart Account address
-        transaction.amountUSDC.toString(),          // Amount in USDC (as string)
-        transaction.offrampRate,                    // Exchange rate
-        ADMIN_WALLET_ADDRESS,                       // Admin LP receives USDC
-        'base-mainnet'                              // Network
+        user.wallet.encryptedWalletData,
+        transaction.userAddress,
+        transaction.amountUSDC.toString(),
+        transaction.offrampRate,
+        ADMIN_WALLET_ADDRESS,
+        'base-mainnet'
       );
 
       txHash = result.transactionHash;
@@ -472,28 +481,43 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     console.log('  💡 USDC received by admin wallet via Aboki');
     console.log('  💸 Now settling NGN to user\'s bank account...');
     
+    // ✅ UPDATE 3a: Use lencoTransferService.createAndInitiateOfframpTransfer()
+    // OR use the lencoService directly if you prefer
+    // Here we use lencoService.initiateLencoTransfer() directly (simpler)
+    
     let lencoResult;
     try {
+      const { initiateLencoTransfer } = require('../services/lencoService');
+      
       lencoResult = await initiateLencoTransfer(
         transaction.amountNGN,
         transaction.beneficiary.accountNumber,
         transaction.beneficiary.bankCode,
         transaction.beneficiary.name,
-        transactionReference
+        transactionReference  // ✅ YOUR reference
       );
 
       if (!lencoResult.success) {
         throw new Error(lencoResult.error || 'Lenco transfer failed');
       }
 
+      // ✅ UPDATE 3b: Store in correct field (lencoTransactionId, not lencoReference)
       transaction.status = 'SETTLING';
-      transaction.lencoReference = lencoResult.transferId;
+      transaction.lencoTransactionId = lencoResult.transferId;  // ✅ Changed field name
       transaction.settledAt = new Date();
       
+      // ✅ NEW: Initialize polling fields
+
+      transaction.pollAttempts = 0;
+      transaction.lastPolledAt = undefined;  // Use undefined
+      transaction.nextPollAt = undefined;    // Use undefined
+      transaction.initiatedAt = new Date();
+            
       await transaction.save();
       
       console.log('  ✅ Lenco settlement initiated');
-      console.log(`     Reference: ${lencoResult.transferId}`);
+      console.log(`     Lenco Transaction ID: ${lencoResult.transferId}`);
+      console.log('  ✅ Polling service will monitor this transaction');
 
     } catch (error: any) {
       console.error(`  ❌ Lenco settlement failed: ${error.message}`);
@@ -552,7 +576,7 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
     res.status(200).json({
         success: true,
         message: 'Aboki order confirmed. NGN settlement in progress.',
-        redirectTo: redirectTo,  // ← ADD THIS
+        redirectTo: redirectTo,
       data: {
         transactionReference,
         status: transaction.status,
@@ -565,11 +589,11 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
         bankName: transaction.beneficiary.bankName,
         bankCode: transaction.beneficiary.bankCode,
         transactionHash: txHash,
-        lencoReference: lencoResult?.transferId,
+        lencoTransactionId: lencoResult?.transferId,  // ✅ Changed field name
         verifiedWithPasskey: true,
         verifiedAt: transaction.passkeyVerifiedAt?.toISOString(),
         estimatedSettlementTime: '5-15 minutes',
-        nextStep: 'Wait for NGN settlement to your bank account',
+        nextStep: 'Wait for NGN settlement to your bank account (Polling in progress)',
         gasSponsored: true,
         explorerUrl: `https://basescan.org/tx/${txHash}`
       }
@@ -587,6 +611,7 @@ export const confirmAccountAndSign = async (req: Request, res: Response): Promis
 };
 
 // ============= GET STATUS =============
+// ✅ UPDATE 4: This now uses the polling service indirectly through the DB
 
 export const getStatus = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -608,6 +633,8 @@ export const getStatus = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // The transaction status is automatically updated by the polling service
+    // So just return the current state from DB
     res.status(200).json({
       success: true,
       data: transaction.getSummary()
@@ -648,6 +675,7 @@ export const getHistory = async (req: Request, res: Response): Promise<void> => 
 };
 
 // ============= LENCO WEBHOOK =============
+// ✅ UPDATE 5: Update webhook to use new field names
 
 export const handleLencoWebhook = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -660,6 +688,8 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
       return;
     }
 
+    // ✅ Import verifyWebhookSignature
+    const { verifyWebhookSignature } = require('../services/lencoService');
     const isValid = verifyWebhookSignature(req.body, signature);
 
     if (!isValid) {
@@ -675,10 +705,13 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
     if (event === 'transfer.completed') {
       console.log(`   ✅ Transfer completed event`);
 
-      const transaction = await OfframpTransaction.findOne({ lencoReference: data.reference });
+      // ✅ UPDATE 5a: Query by transactionReference (your reference), not lencoReference
+      const transaction = await OfframpTransaction.findOne({ 
+        transactionReference: data.reference 
+      });
 
       if (!transaction) {
-        console.warn(`   ⚠️ Transaction not found for Lenco reference: ${data.reference}`);
+        console.warn(`   ⚠️ Transaction not found for reference: ${data.reference}`);
         res.status(200).json({ success: true, message: 'Webhook processed' });
         return;
       }
@@ -691,6 +724,7 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
 
       transaction.status = 'COMPLETED';
       transaction.completedAt = new Date();
+      transaction.lencoStatus = 'successful';  // ✅ NEW: Update lencoStatus
       await transaction.save();
 
       console.log(`   ✅ Transaction marked COMPLETED`);
@@ -700,10 +734,13 @@ export const handleLencoWebhook = async (req: Request, res: Response): Promise<v
     } else if (event === 'transfer.failed') {
       console.log(`   ❌ Transfer failed event`);
 
-      const transaction = await OfframpTransaction.findOne({ lencoReference: data.reference });
+      const transaction = await OfframpTransaction.findOne({ 
+        transactionReference: data.reference 
+      });
 
       if (transaction) {
         transaction.status = 'FAILED';
+        transaction.lencoStatus = 'failed';  // ✅ NEW: Update lencoStatus
         transaction.errorCode = 'LENCO_FAILED';
         transaction.errorMessage = data.reason || 'Lenco settlement failed';
         transaction.failureReason = data.reason || 'Settlement failed';

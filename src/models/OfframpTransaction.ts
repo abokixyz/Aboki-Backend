@@ -1,9 +1,9 @@
-// ============= src/models/OfframpTransaction.ts (UPDATED FOR POLLING) =============
+// ============= src/models/OfframpTransaction.ts (UPDATED FOR FIXED POLLING) =============
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
 interface IOfframpTransaction extends Document {
   // Identifiers
-  transactionReference: string;
+  transactionReference: string; // ✅ YOUR reference (ABOKI_OFFRAMP_*) - used for polling
   userId: mongoose.Types.ObjectId;
   userAddress: string;
 
@@ -28,9 +28,9 @@ interface IOfframpTransaction extends Document {
   // Blockchain
   transactionHash?: string;
 
-  // Lenco Integration
-  lencoReference?: string;
-  lencoStatus?: string; // pending, processing, successful, failed, rejected
+  // Lenco Integration (FIXED)
+  lencoTransactionId?: string; // ✅ Lenco's transaction ID (from response)
+  lencoStatus?: string; // pending, successful, failed, declined
 
   // Status
   status: 'PENDING' | 'PROCESSING' | 'SETTLING' | 'COMPLETED' | 'FAILED';
@@ -40,26 +40,29 @@ interface IOfframpTransaction extends Document {
   errorMessage?: string;
   failureReason?: string;
 
-  // Polling Tracking (NEW)
-  pollAttempts?: number; // Number of times we've polled this transaction
-  lastPolledAt?: Date; // Last time we checked status with Lenco
-  polledAt?: Date; // When we last updated via polling
+  // Polling Tracking
+  pollAttempts?: number; // Number of times we've polled Lenco
+  lastPolledAt?: Date; // Last time we queried Lenco
+  nextPollAt?: Date; // When to poll next
 
   // Timestamps
   createdAt?: Date;
+  initiatedAt?: Date; // When transfer was initiated with Lenco
   processedAt?: Date; // When user confirmed with passkey
   settledAt?: Date; // When settlement was initiated
   completedAt?: Date; // When settlement finished
   passkeyVerifiedAt?: Date; // When passkey verification occurred
-  passkeyVerified?: boolean;
 
   // Metadata
   rateSource?: 'Paycrest' | 'Fallback';
   cached?: boolean;
   webhookAttempts?: number;
+  passkeyVerified?: boolean;
 
   // Methods
   getSummary(): any;
+  updatePollingStatus(status: string): void;
+  markAsPolled(): void;
 }
 
 // Define the static methods interface
@@ -68,6 +71,10 @@ interface IOfframpTransactionModel extends Model<IOfframpTransaction> {
     userId: string,
     limit?: number,
     skip?: number
+  ): Promise<IOfframpTransaction[]>;
+  
+  findActiveTransactions(
+    limit?: number
   ): Promise<IOfframpTransaction[]>;
 }
 
@@ -78,7 +85,9 @@ const OfframpTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
       type: String,
       required: true,
       unique: true,
-      index: true
+      index: true,
+      // Format: ABOKI_OFFRAMP_1699564800000_ABC12XYZ
+      match: /^ABOKI_OFFRAMP_/
     },
     userId: {
       type: Schema.Types.ObjectId,
@@ -94,51 +103,84 @@ const OfframpTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
     // Amount & Rate
     amountUSDC: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     feeUSDC: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     netUSDC: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     amountNGN: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     baseRate: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     offrampRate: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     effectiveRate: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
     lpFeeUSDC: {
       type: Number,
-      required: true
+      required: true,
+      min: 0
     },
 
     // Beneficiary
     beneficiary: {
-      name: String,
-      accountNumber: String,
-      bankCode: String,
-      bankName: String
+      name: {
+        type: String,
+        required: true
+      },
+      accountNumber: {
+        type: String,
+        required: true
+      },
+      bankCode: {
+        type: String,
+        required: true
+      },
+      bankName: {
+        type: String,
+        sparse: true
+      }
     },
 
     // Blockchain
-    transactionHash: String,
+    transactionHash: {
+      type: String,
+      sparse: true,
+      index: true
+    },
 
-    // Lenco Integration
-    lencoReference: String,
-    lencoStatus: String, // Track Lenco's status independently
+    // ✅ FIXED: Lenco Integration
+    lencoTransactionId: {
+      type: String,
+      sparse: true,
+      index: true,
+      // This is Lenco's internal transaction ID (gets populated after initiating transfer)
+    },
+    lencoStatus: {
+      type: String,
+      enum: ['pending', 'successful', 'failed', 'declined'],
+      sparse: true
+    },
 
     // Status
     status: {
@@ -149,37 +191,74 @@ const OfframpTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
     },
 
     // Error Handling
-    errorCode: String,
-    errorMessage: String,
-    failureReason: String,
+    errorCode: {
+      type: String,
+      sparse: true
+    },
+    errorMessage: {
+      type: String,
+      sparse: true
+    },
+    failureReason: {
+      type: String,
+      sparse: true
+    },
 
-    // Polling Tracking (NEW)
+    // Polling Tracking
     pollAttempts: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
-    lastPolledAt: Date,
-    polledAt: Date,
+    lastPolledAt: {
+      type: Date,
+      sparse: true
+    },
+    nextPollAt: {
+      type: Date,
+      sparse: true
+    },
 
     // Timestamps
-    processedAt: Date,
-    settledAt: Date,
-    completedAt: Date,
-    passkeyVerifiedAt: Date,
-    passkeyVerified: {
-      type: Boolean,
-      default: false
+    initiatedAt: {
+      type: Date,
+      sparse: true
+    },
+    processedAt: {
+      type: Date,
+      sparse: true
+    },
+    settledAt: {
+      type: Date,
+      sparse: true
+    },
+    completedAt: {
+      type: Date,
+      sparse: true
+    },
+    passkeyVerifiedAt: {
+      type: Date,
+      sparse: true
     },
 
     // Metadata
     rateSource: {
       type: String,
-      enum: ['Paycrest', 'Fallback']
+      enum: ['Paycrest', 'Fallback'],
+      sparse: true
     },
-    cached: Boolean,
+    cached: {
+      type: Boolean,
+      default: false
+    },
     webhookAttempts: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
+    },
+    passkeyVerified: {
+      type: Boolean,
+      default: false
     }
   },
   {
@@ -188,34 +267,44 @@ const OfframpTransactionSchema = new Schema<IOfframpTransaction, IOfframpTransac
   }
 );
 
-// Indexes for querying
+// ✅ Indexes for efficient querying
 OfframpTransactionSchema.index({ userId: 1, status: 1 });
-OfframpTransactionSchema.index({ status: 1, lencoReference: 1 });
-OfframpTransactionSchema.index({ createdAt: -1 });
-OfframpTransactionSchema.index({ status: 1, processedAt: 1 }); // For polling query
+OfframpTransactionSchema.index({ status: 1, initiatedAt: 1 }); // For finding active transactions to poll
+OfframpTransactionSchema.index({ transactionReference: 1 }); // For looking up by reference
+OfframpTransactionSchema.index({ lencoTransactionId: 1 }); // For Lenco lookups
+OfframpTransactionSchema.index({ createdAt: -1 }); // For sorting by newest
+OfframpTransactionSchema.index({ status: 1, lastPolledAt: 1 }); // For polling query
 
-// Get summary of transaction
+// ✅ Instance method: Get transaction summary
 OfframpTransactionSchema.methods.getSummary = function() {
+  const pollDiff = this.lastPolledAt ? Date.now() - this.lastPolledAt.getTime() : null;
+  const isStale = pollDiff && pollDiff > 5 * 60 * 1000; // More than 5 minutes old
+
   return {
     transactionReference: this.transactionReference,
     status: this.status,
+    lencoStatus: this.lencoStatus,
     amountUSDC: this.amountUSDC,
     amountNGN: this.amountNGN,
     beneficiary: {
       name: this.beneficiary.name,
-      accountNumber: this.beneficiary.accountNumber.slice(-4).padStart(this.beneficiary.accountNumber.length, '*'),
+      accountNumber: `****${this.beneficiary.accountNumber.slice(-4)}`,
       bankName: this.beneficiary.bankName
     },
     createdAt: this.createdAt,
+    initiatedAt: this.initiatedAt,
     processedAt: this.processedAt,
     completedAt: this.completedAt,
-    lencoReference: this.lencoReference,
-    lencoStatus: this.lencoStatus,
+    
+    // ✅ Polling info
     pollingInfo: {
       pollAttempts: this.pollAttempts || 0,
       lastPolledAt: this.lastPolledAt,
-      isStale: this.lastPolledAt && (Date.now() - this.lastPolledAt.getTime()) > 5 * 60 * 1000 // More than 5 minutes old
+      isStale: isStale,
+      nextPollAt: this.nextPollAt
     },
+    
+    // Error info
     error: this.errorMessage ? {
       code: this.errorCode,
       message: this.errorMessage,
@@ -224,7 +313,40 @@ OfframpTransactionSchema.methods.getSummary = function() {
   };
 };
 
-// Static method to find user's transactions
+// ✅ Instance method: Update polling status
+OfframpTransactionSchema.methods.updatePollingStatus = function(status: string) {
+  if (['pending', 'successful', 'failed', 'declined'].includes(status)) {
+    this.lencoStatus = status;
+    
+    // Update main status based on Lenco status
+    switch (status) {
+      case 'successful':
+        this.status = 'COMPLETED';
+        this.completedAt = new Date();
+        break;
+      case 'failed':
+      case 'declined':
+        this.status = 'FAILED';
+        this.completedAt = new Date();
+        this.errorCode = 'LENCO_SETTLEMENT_FAILED';
+        this.errorMessage = `Lenco settlement ${status}`;
+        break;
+      case 'pending':
+        this.status = 'SETTLING';
+        break;
+    }
+  }
+};
+
+// ✅ Instance method: Mark as polled
+OfframpTransactionSchema.methods.markAsPolled = function() {
+  this.lastPolledAt = new Date();
+  this.pollAttempts = (this.pollAttempts || 0) + 1;
+  // Schedule next poll in 5 seconds
+  this.nextPollAt = new Date(Date.now() + 5000);
+};
+
+// ✅ Static method: Find user's transactions
 OfframpTransactionSchema.statics.findUserTransactions = async function(
   userId: string,
   limit: number = 10,
@@ -234,6 +356,19 @@ OfframpTransactionSchema.statics.findUserTransactions = async function(
     .sort({ createdAt: -1 })
     .limit(limit)
     .skip(skip)
+    .lean();
+};
+
+// ✅ Static method: Find active transactions needing polling
+OfframpTransactionSchema.statics.findActiveTransactions = async function(
+  limit: number = 10
+): Promise<IOfframpTransaction[]> {
+  return this.find({
+    status: { $in: ['PROCESSING', 'SETTLING'] },
+    initiatedAt: { $exists: true }
+  })
+    .sort({ lastPolledAt: 1 }) // Poll least recently polled first
+    .limit(limit)
     .lean();
 };
 

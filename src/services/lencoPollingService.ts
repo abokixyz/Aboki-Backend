@@ -1,9 +1,12 @@
 // ============= src/services/lencoPollingService.ts =============
 /**
- * Lenco Status Polling Service
+ * Lenco Status Polling Service - FIXED
  * 
- * Polls Lenco for transfer status using the CORRECT reference
- * Issue: Must use lencoReference (transfer ID), NOT offramp transaction reference
+ * ✅ CORRECT: Query Lenco using the transaction REFERENCE (your custom reference)
+ * ❌ WRONG: Using Lenco's internal transaction ID
+ * 
+ * When you initiate a transfer, send your reference: ABOKI_OFFRAMP_MJF$2DICD4B4BF2
+ * Lenco will store it and you query it back using that same reference
  */
 
 import axios from 'axios';
@@ -18,13 +21,19 @@ if (!LENCO_API_KEY) {
 }
 
 /**
- * Get Lenco transfer status using CORRECT reference
+ * ✅ FIXED: Query Lenco transfer status using YOUR reference (not Lenco's transaction ID)
  * 
- * ✅ CORRECT: Use lencoReference (the transfer ID from Lenco)
- * ❌ WRONG: Use offramp transactionReference
+ * When you POST to /transfers, you include:
+ * {
+ *   "reference": "ABOKI_OFFRAMP_MJF$2DICD4B4BF2",  ← YOUR reference
+ *   ...
+ * }
+ * 
+ * Then query it back using that same reference:
+ * GET /transfers?reference=ABOKI_OFFRAMP_MJF$2DICD4B4BF2
  */
 export async function getLencoTransferStatus(
-  lencoTransferId: string  // ✅ This is the ID returned from initiateLencoTransfer
+  offrampTransactionReference: string  // ✅ Your ABOKI_OFFRAMP_* reference
 ): Promise<{
   success: boolean;
   status: 'pending' | 'successful' | 'failed' | 'declined' | null;
@@ -33,24 +42,27 @@ export async function getLencoTransferStatus(
   error?: string;
 }> {
   try {
-    if (!lencoTransferId) {
+    if (!offrampTransactionReference) {
       return {
         success: false,
         status: null,
-        message: 'No Lenco transfer ID provided',
-        error: 'Missing lencoTransferId'
+        message: 'No transaction reference provided',
+        error: 'Missing offrampTransactionReference'
       };
     }
 
     console.log(`\n🔍 Checking Lenco transfer status...`);
-    console.log(`   Transfer ID: ${lencoTransferId}`);
+    console.log(`   Reference: ${offrampTransactionReference}`);
 
-    // ✅ CORRECT ENDPOINT: Use transfer ID, not transaction reference
-    const url = `${LENCO_API_BASE}/transactions/${lencoTransferId}`;
+    // ✅ CORRECT ENDPOINT: Query by reference parameter
+    const url = `${LENCO_API_BASE}/transfers`;
 
-    console.log(`   Endpoint: ${url}`);
+    console.log(`   Endpoint: ${url}?reference=${offrampTransactionReference}`);
 
     const response = await axios.get(url, {
+      params: {
+        reference: offrampTransactionReference
+      },
       headers: {
         'Authorization': `Bearer ${LENCO_API_KEY}`,
         'Accept': 'application/json'
@@ -58,17 +70,20 @@ export async function getLencoTransferStatus(
       timeout: 10000
     });
 
-    if (!response.data || !response.data.status) {
-      console.log(`   ⚠️ Unexpected response format`);
+    // Lenco returns array of matching transfers
+    if (!response.data || !response.data.data || response.data.data.length === 0) {
+      console.log(`   ⚠️ No transfers found for reference`);
       return {
         success: false,
         status: null,
-        message: 'Invalid response from Lenco',
+        message: 'No transfer found for this reference',
         data: response.data
       };
     }
 
-    const status = response.data.status.toLowerCase();
+    // Get the first (most recent) transfer
+    const transfer = response.data.data[0];
+    const status = transfer.status?.toLowerCase();
     const validStatuses = ['pending', 'successful', 'failed', 'declined'];
     
     if (!validStatuses.includes(status)) {
@@ -77,32 +92,43 @@ export async function getLencoTransferStatus(
         success: false,
         status: null,
         message: `Unknown transfer status: ${status}`,
-        data: response.data
+        data: transfer
       };
     }
 
     console.log(`   ✅ Status: ${status.toUpperCase()}`);
+    console.log(`   Lenco Transaction ID: ${transfer.id}`);
+    console.log(`   Amount: ${transfer.amount} ${transfer.currency}`);
 
     return {
       success: true,
       status: status as 'pending' | 'successful' | 'failed' | 'declined',
       message: `Transfer is ${status}`,
-      data: response.data
+      data: transfer
     };
   } catch (error: any) {
     const status = error.response?.status;
     const message = error.response?.data?.message || error.message;
 
-    // ❌ This is the error you're seeing - 404 means wrong reference
     if (status === 404) {
-      console.error(`   ❌ Lenco transfer not found (404)`);
-      console.error(`   📌 Make sure you're using the Lenco transfer ID, not the offramp reference`);
+      console.error(`   ❌ Transfer not found (404)`);
+      console.error(`   📌 Make sure the reference was sent to Lenco when initiating transfer`);
       
       return {
         success: false,
         status: null,
-        message: 'Lenco transfer not found - verify reference is correct',
+        message: 'Transfer not found on Lenco - verify reference is correct',
         error: `404 Not Found: ${message}`
+      };
+    }
+
+    if (status === 401) {
+      console.error(`   ❌ Unauthorized (401) - Check LENCO_API_KEY`);
+      return {
+        success: false,
+        status: null,
+        message: 'API authentication failed',
+        error: message
       };
     }
 
@@ -120,7 +146,7 @@ export async function getLencoTransferStatus(
  * Poll Lenco status every 5 seconds until completion (max 30 attempts = 2.5 minutes)
  */
 export async function pollLencoUntilComplete(
-  lencoTransferId: string,
+  offrampTransactionReference: string,
   maxAttempts: number = 30,
   intervalSeconds: number = 5
 ): Promise<{
@@ -133,7 +159,7 @@ export async function pollLencoUntilComplete(
   let lastStatus: 'pending' | 'successful' | 'failed' | 'declined' | null = null;
 
   console.log(`\n📋 Starting Lenco polling...`);
-  console.log(`   Transfer ID: ${lencoTransferId}`);
+  console.log(`   Reference: ${offrampTransactionReference}`);
   console.log(`   Max attempts: ${maxAttempts}`);
   console.log(`   Interval: ${intervalSeconds}s`);
 
@@ -141,7 +167,7 @@ export async function pollLencoUntilComplete(
     attempts++;
     console.log(`\n   [Attempt ${attempts}/${maxAttempts}]`);
 
-    const result = await getLencoTransferStatus(lencoTransferId);
+    const result = await getLencoTransferStatus(offrampTransactionReference);
     lastStatus = result.status;
 
     if (!result.success || !result.status) {
@@ -196,8 +222,7 @@ export function startPollingService(): void {
     try {
       // Find all active offramp transactions
       const activeTransactions = await OfframpTransaction.find({
-        status: { $in: ['PROCESSING', 'SETTLING'] },
-        lencoReference: { $exists: true, $ne: null }
+        status: { $in: ['PROCESSING', 'SETTLING'] }
       }).limit(10); // Process max 10 at a time
 
       if (activeTransactions.length === 0) {
@@ -209,10 +234,16 @@ export function startPollingService(): void {
       // Poll each transaction
       for (const transaction of activeTransactions) {
         try {
-          const result = await getLencoTransferStatus(transaction.lencoReference!);
+          // ✅ Use the transaction's own reference to query Lenco
+          const result = await getLencoTransferStatus(transaction.transactionReference);
 
           if (!result.success || !result.status) {
             continue; // Skip if we can't get status
+          }
+
+          // Store the Lenco transaction ID for future reference
+          if (result.data?.id && !transaction.lencoTransactionId) {
+            transaction.lencoTransactionId = result.data.id;
           }
 
           // Update transaction based on Lenco status
@@ -274,18 +305,11 @@ export async function pollSpecificTransaction(
       };
     }
 
-    if (!transaction.lencoReference) {
-      return {
-        success: false,
-        message: 'No Lenco reference available for polling'
-      };
-    }
-
     console.log(`\n🚀 Polling specific transaction: ${transaction.transactionReference}`);
 
-    // Poll Lenco every 5 seconds, max 30 attempts (2.5 minutes)
+    // ✅ Poll Lenco using the transaction reference
     const result = await pollLencoUntilComplete(
-      transaction.lencoReference,
+      transaction.transactionReference,
       30,
       5
     );
@@ -339,17 +363,8 @@ export async function updateOfframpStatusFromLenco(
       };
     }
 
-    if (!transaction.lencoReference) {
-      return {
-        success: false,
-        updated: false,
-        newStatus: transaction.status,
-        message: 'No Lenco reference available'
-      };
-    }
-
-    // ✅ CORRECT: Use lencoReference (the Lenco transfer ID)
-    const result = await getLencoTransferStatus(transaction.lencoReference);
+    // ✅ CORRECT: Use the transaction reference (what you sent to Lenco)
+    const result = await getLencoTransferStatus(transaction.transactionReference);
 
     if (!result.success) {
       return {
@@ -358,6 +373,11 @@ export async function updateOfframpStatusFromLenco(
         newStatus: transaction.status,
         message: result.error || 'Failed to get Lenco status'
       };
+    }
+
+    // Store Lenco's transaction ID for future reference
+    if (result.data?.id && !transaction.lencoTransactionId) {
+      transaction.lencoTransactionId = result.data.id;
     }
 
     // Update transaction based on Lenco status

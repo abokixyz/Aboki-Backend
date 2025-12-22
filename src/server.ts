@@ -1,4 +1,4 @@
-// ============= src/server.ts (WITH REWARDS & HISTORY ROUTES) =============
+// ============= src/server.ts (FIXED CORS) =============
 import express, { Application, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
@@ -47,7 +47,8 @@ const corsOptions = {
           'http://localhost:5173',
           'https://aboki.xyz',
           'https://www.aboki.xyz',
-          'https://app.aboki.xyz'
+          'https://app.aboki.xyz',
+          'https://aboki-v2-frontend-one.vercel.app'  // ✅ ADDED VERCEL URL
         ];
     
     console.log('🔍 CORS Check:', {
@@ -96,13 +97,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
       : [
           'http://localhost:3000',
-          'https://aboki-v2-frontend-one.vercel.app',
           'http://localhost:3001', 
           'http://localhost:5173',
           'https://aboki.xyz',
           'https://www.aboki.xyz',
           'https://app.aboki.xyz',
-
+          'https://aboki-v2-frontend-one.vercel.app'  // ✅ ADDED VERCEL URL
         ];
     
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
@@ -349,14 +349,14 @@ app.listen(PORT, () => {
 ║                                                                ║
 ║   ✅ All Routes Registered                                    ║
 ║   ✅ MongoDB Connected                                        ║
-║   ✅ CORS Enabled                                             ║
+║   ✅ CORS Enabled (Vercel + localhost)                        ║
 ║   ✅ Swagger Docs Available                                   ║
 ║   ✅ Passkey Transaction Verification Active                  ║
 ║   ✅ Lenco Polling Service Started                            ║
 ║   ✅ History Routes Registered                                ║
 ║   ✅ Reward Points System Active                              ║
 ║                                                                ║
-║   CORS Origins: ${process.env.CORS_ORIGIN || 'localhost defaults'}
+║   CORS Origins: ${process.env.CORS_ORIGIN || 'localhost + Vercel defaults'}
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
   `);

@@ -96,11 +96,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
       ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
       : [
           'http://localhost:3000',
+          'https://aboki-v2-frontend-one.vercel.app',
           'http://localhost:3001', 
           'http://localhost:5173',
           'https://aboki.xyz',
           'https://www.aboki.xyz',
-          'https://app.aboki.xyz'
+          'https://app.aboki.xyz',
+
         ];
     
     if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {

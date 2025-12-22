@@ -1,43 +1,45 @@
-// ============= src/routes/offrampRoutes.ts (WITH PASSKEY VERIFICATION) =============
+// ============= src/routes/offrampRoutes.ts =============
 /**
- * CORRECTED OFFRAMP FLOW WITH PASSKEY:
+ * OFFRAMP FLOW WITH PASSKEY VERIFICATION:
  * 
- * 1. User initiates offramp
- *    POST /api/offramp/initiate
- *    Request: { amountUSDC, accountNumber, bankCode }
- *    Response: { transactionRef, accountName, amountNGN } (status: PENDING)
+ * 1. POST /api/offramp/initiate
+ *    - Create transaction record
+ *    - Response: transactionReference, accountName, amountNGN
  * 
- * 2. User verifies account (optional, but recommended)
- *    POST /api/offramp/verify-account
- *    Request: { accountNumber, bankCode }
- *    Response: { accountName, bankCode, bankName }
+ * 2. POST /api/auth/passkey/transaction-verify-options
+ *    - Get passkey challenge
+ *    - User completes biometric auth
  * 
- * 3. User requests passkey challenge
- *    POST /api/auth/passkey/transaction-verify-options
- *    Request: { type: 'withdraw', amount, recipient: bankCode }
- *    Response: { challenge, timeout, rpId }
+ * 3. POST /api/auth/passkey/transaction-verify
+ *    - Verify biometric signature
+ *    - Get verification token
+ *    - Include X-Passkey-Verified-Token header in next request
  * 
- * 4. User completes biometric auth & gets verification token
- *    POST /api/auth/passkey/transaction-verify
- *    Request: { credentialId, signature, authenticatorData, etc }
- *    Response: { verified: true, token }
- * 
- * 5. User confirms account & initiates settlement
- *    POST /api/offramp/confirm-account-and-sign
- *    Request: { transactionRef, passkeyToken, accountNumber, bankCode }
- *    Response: { status: PROCESSING, lencoRef }
+ * 4. POST /api/offramp/confirm-account-and-sign
+ *    - Include X-Passkey-Verified-Token header
+ *    - Confirms account match
+ *    - Executes Aboki.createOrder() on Smart Account
+ *    - Initiates Lenco settlement
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { authMiddleware, protect } from '../middleware/auth';
+import { protect } from '../middleware/auth';
+import { 
+  verifyPasskeyToken, 
+  requirePasskeyVerification 
+} from '../middleware/passkeyVerification';
 import { validateRequest } from '../middleware/validation';
 import rateLimitMiddleware from '../middleware/rateLimiter';
 import offrampController from '../controllers/offrampController';
 
 const router = Router();
 
+// ============= ROOT ENDPOINT =============
+
 /**
- * ROOT ENDPOINT
+ * @route   GET /api/offramp
+ * @access  Public
+ * @desc    API information
  */
 router.get('/', (req: Request, res: Response) => {
   res.json({
@@ -54,14 +56,13 @@ router.get('/', (req: Request, res: Response) => {
   });
 });
 
-/**
- * PUBLIC ENDPOINTS
- */
+// ============= PUBLIC ENDPOINTS =============
 
 /**
  * @route    GET /api/offramp/rate
  * @access   Public
  * @desc     Get current offramp rate
+ * @query    amountUSDC - Optional amount for specific calculation
  */
 router.get(
   '/rate',
@@ -72,48 +73,25 @@ router.get(
 /**
  * @route    POST /api/offramp/verify-account
  * @access   Public
- * @desc     Verify bank account details
+ * @desc     Verify Nigerian bank account details
  * 
- * @swagger
- * /api/offramp/verify-account:
- *   post:
- *     summary: Verify Nigerian bank account
- *     description: |
- *       Verify a bank account before initiating offramp.
- *       Returns account name if verification succeeds.
- *       
- *       This is used to confirm the account number is correct.
- *     tags: [Offramp]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - accountNumber
- *               - bankCode
- *             properties:
- *               accountNumber:
- *                 type: string
- *                 example: "1234567890"
- *               bankCode:
- *                 type: string
- *                 example: "011"
- *     responses:
- *       200:
- *         description: Account verified successfully
- *         content:
- *           application/json:
- *             example:
- *               success: true
- *               data:
- *                 accountName: "John Doe"
- *                 accountNumber: "1234567890"
- *                 bankCode: "011"
- *                 bankName: "First Bank of Nigeria"
- *       400:
- *         description: Invalid account or verification failed
+ * @example
+ * POST /api/offramp/verify-account
+ * {
+ *   "accountNumber": "1234567890",
+ *   "bankCode": "011"
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "accountName": "John Doe",
+ *     "accountNumber": "1234567890",
+ *     "bankCode": "011",
+ *     "bankName": "First Bank of Nigeria"
+ *   }
+ * }
  */
 router.post(
   '/verify-account',
@@ -129,8 +107,12 @@ router.post(
 
 /**
  * @route    POST /api/offramp/webhook/lenco
- * @access   Public
+ * @access   Public (Webhook from Lenco)
  * @desc     Lenco settlement confirmation webhook
+ * 
+ * Events:
+ * - transfer.completed
+ * - transfer.failed
  */
 router.post(
   '/webhook/lenco',
@@ -138,70 +120,35 @@ router.post(
   offrampController.handleLencoWebhook
 );
 
-/**
- * PROTECTED ENDPOINTS (Require JWT)
- */
+// ============= PROTECTED ENDPOINTS (JWT Required) =============
 
 /**
  * @route    POST /api/offramp/initiate
  * @access   Private (JWT required)
  * @desc     Initiate USDC → NGN offramp transaction
  * 
- * @swagger
- * /api/offramp/initiate:
- *   post:
- *     summary: Initiate offramp transaction
- *     description: |
- *       Start an offramp transaction. Creates a PENDING transaction record.
- *       
- *       Process:
- *       1. Validate amount (0.1-5000 USDC)
- *       2. Verify bank account with Lenco
- *       3. Calculate NGN amount with fees
- *       4. Create transaction record (PENDING)
- *       5. User must verify account & sign with passkey
- *       
- *       Next step: Call POST /api/offramp/verify-account to confirm details
- *       Then: Call POST /api/offramp/confirm-account-and-sign after passkey verification
- *     tags: [Offramp]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - amountUSDC
- *               - accountNumber
- *               - bankCode
- *             properties:
- *               amountUSDC:
- *                 type: number
- *                 minimum: 0.1
- *                 maximum: 5000
- *                 example: 100
- *               accountNumber:
- *                 type: string
- *                 example: "1234567890"
- *               bankCode:
- *                 type: string
- *                 example: "011"
- *     responses:
- *       201:
- *         description: Offramp initiated (PENDING verification)
- *         content:
- *           application/json:
- *             example:
- *               success: true
- *               data:
- *                 transactionReference: "ABOKI_OFFRAMP_abc123..."
- *                 status: "PENDING"
- *                 amountUSDC: 100
- *                 amountNGN: 140580
- *                 accountName: "John Doe"
- *                 nextStep: "Verify account & sign with passkey"
+ * @example
+ * POST /api/offramp/initiate
+ * Authorization: Bearer {jwt_token}
+ * {
+ *   "amountUSDC": 100,
+ *   "accountNumber": "1234567890",
+ *   "bankCode": "011"
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "transactionReference": "ABOKI_OFFRAMP_...",
+ *     "status": "PENDING",
+ *     "amountUSDC": 100,
+ *     "amountNGN": 140580,
+ *     "accountName": "John Doe",
+ *     "accountNumber": "****7890",
+ *     "nextStep": "Verify account & sign with passkey"
+ *   }
+ * }
  */
 router.post(
   '/initiate',
@@ -209,7 +156,7 @@ router.post(
   rateLimitMiddleware,
   validateRequest({
     body: {
-      amountUSDC: { type: 'number', required: true, min: 0.1, max: 5000 },
+      amountUSDC: { type: 'number', required: true, min: 0.1, max: 5000 }
     }
   }),
   offrampController.initiateOfframp
@@ -220,79 +167,46 @@ router.post(
  * @access   Private (JWT required + Passkey token required)
  * @desc     Confirm account details and sign transaction with passkey
  * 
- * @swagger
- * /api/offramp/confirm-account-and-sign:
- *   post:
- *     summary: Confirm account and sign transaction with passkey
- *     description: |
- *       Final step of offramp: Confirm account is correct, verify with passkey signature,
- *       and initiate Lenco settlement.
- *       
- *       This requires:
- *       1. Valid transaction reference from /initiate
- *       2. Valid passkey verification token from /api/auth/passkey/transaction-verify
- *       3. Account details match original transaction
- *       4. Include X-Passkey-Verified: true header
- *       
- *       Status flow: PENDING → PROCESSING → SETTLING → COMPLETED
- *     tags: [Offramp]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: header
- *         name: X-Passkey-Verified
- *         required: true
- *         schema:
- *           type: string
- *           enum: ['true']
- *         description: Must be 'true' after passkey verification
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - transactionReference
- *               - accountNumber
- *               - bankCode
- *             properties:
- *               transactionReference:
- *                 type: string
- *                 example: "ABOKI_OFFRAMP_abc123..."
- *                 description: From /initiate response
- *               accountNumber:
- *                 type: string
- *                 example: "1234567890"
- *                 description: Must match original account
- *               bankCode:
- *                 type: string
- *                 example: "011"
- *                 description: Must match original bank
- *     responses:
- *       200:
- *         description: Account confirmed and settlement initiated
- *         content:
- *           application/json:
- *             example:
- *               success: true
- *               data:
- *                 transactionReference: "ABOKI_OFFRAMP_abc123..."
- *                 status: "SETTLING"
- *                 amountUSDC: 100
- *                 amountNGN: 140580
- *                 accountName: "John Doe"
- *                 lencoReference: "LENCO_REF_123"
- *                 estimatedTime: "5-15 minutes"
- *                 verifiedWithPasskey: true
- *       400:
- *         description: Account mismatch or invalid request
- *       401:
- *         description: Missing passkey verification or invalid token
+ * This is the final step:
+ * 1. Validates account matches original
+ * 2. Checks passkey verification token
+ * 3. Executes Aboki.createOrder() on Smart Account (gasless)
+ * 4. Initiates Lenco NGN settlement
+ * 
+ * @headers
+ * - Authorization: Bearer {jwt_token}
+ * - X-Passkey-Verified-Token: {passkey_token_from_step_3}
+ * 
+ * @example
+ * POST /api/offramp/confirm-account-and-sign
+ * Authorization: Bearer {jwt_token}
+ * X-Passkey-Verified-Token: {passkey_token}
+ * {
+ *   "transactionReference": "ABOKI_OFFRAMP_...",
+ *   "accountNumber": "1234567890",
+ *   "bankCode": "011"
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "transactionReference": "ABOKI_OFFRAMP_...",
+ *     "status": "SETTLING",
+ *     "amountUSDC": 100,
+ *     "amountNGN": 140580,
+ *     "accountName": "John Doe",
+ *     "transactionHash": "0x...",
+ *     "lencoTransactionId": "LENCO_...",
+ *     "verifiedWithPasskey": true,
+ *     "estimatedSettlementTime": "5-15 minutes"
+ *   }
+ * }
  */
 router.post(
   '/confirm-account-and-sign',
   protect,
+  verifyPasskeyToken,  // ✅ Check for passkey token
   rateLimitMiddleware,
   offrampController.confirmAccountAndSign
 );
@@ -301,6 +215,28 @@ router.post(
  * @route    GET /api/offramp/status/:reference
  * @access   Private (JWT required)
  * @desc     Get transaction status
+ * 
+ * @param    reference - Transaction reference from initiate response
+ * 
+ * @example
+ * GET /api/offramp/status/ABOKI_OFFRAMP_...
+ * Authorization: Bearer {jwt_token}
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "transactionReference": "ABOKI_OFFRAMP_...",
+ *     "status": "SETTLING",
+ *     "amountUSDC": 100,
+ *     "amountNGN": 140580,
+ *     "accountName": "John Doe",
+ *     "bankName": "First Bank",
+ *     "transactionHash": "0x...",
+ *     "lencoTransactionId": "LENCO_...",
+ *     "createdAt": "2024-01-01T00:00:00Z"
+ *   }
+ * }
  */
 router.get(
   '/status/:reference',
@@ -312,7 +248,26 @@ router.get(
 /**
  * @route    GET /api/offramp/history
  * @access   Private (JWT required)
- * @desc     Get transaction history
+ * @desc     Get user's offramp transaction history
+ * 
+ * @query    limit - Number of transactions (default: 10, max: 50)
+ * @query    skip - Pagination offset (default: 0)
+ * 
+ * @example
+ * GET /api/offramp/history?limit=20&skip=0
+ * Authorization: Bearer {jwt_token}
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "data": [...transactions],
+ *   "pagination": {
+ *     "total": 100,
+ *     "limit": 20,
+ *     "skip": 0,
+ *     "hasMore": true
+ *   }
+ * }
  */
 router.get(
   '/history',
@@ -321,10 +276,22 @@ router.get(
   offrampController.getHistory
 );
 
-/**
- * BENEFICIARY ENDPOINTS
- */
+// ============= BENEFICIARY ENDPOINTS =============
 
+/**
+ * @route    POST /api/offramp/beneficiaries
+ * @access   Private (JWT required)
+ * @desc     Add a new beneficiary bank account
+ * 
+ * @example
+ * POST /api/offramp/beneficiaries
+ * Authorization: Bearer {jwt_token}
+ * {
+ *   "name": "John Doe",
+ *   "accountNumber": "1234567890",
+ *   "bankCode": "011"
+ * }
+ */
 router.post(
   '/beneficiaries',
   protect,
@@ -339,6 +306,15 @@ router.post(
   offrampController.addBeneficiary
 );
 
+/**
+ * @route    GET /api/offramp/beneficiaries
+ * @access   Private (JWT required)
+ * @desc     Get all saved beneficiaries
+ * 
+ * @example
+ * GET /api/offramp/beneficiaries
+ * Authorization: Bearer {jwt_token}
+ */
 router.get(
   '/beneficiaries',
   protect,
@@ -346,6 +322,13 @@ router.get(
   offrampController.getBeneficiaries
 );
 
+/**
+ * @route    DELETE /api/offramp/beneficiaries/:id
+ * @access   Private (JWT required)
+ * @desc     Delete a beneficiary
+ * 
+ * @param    id - Beneficiary ID
+ */
 router.delete(
   '/beneficiaries/:id',
   protect,
@@ -353,6 +336,13 @@ router.delete(
   offrampController.deleteBeneficiary
 );
 
+/**
+ * @route    PUT /api/offramp/beneficiaries/:id/default
+ * @access   Private (JWT required)
+ * @desc     Set a beneficiary as default
+ * 
+ * @param    id - Beneficiary ID
+ */
 router.put(
   '/beneficiaries/:id/default',
   protect,
@@ -360,10 +350,20 @@ router.put(
   offrampController.setDefaultBeneficiary
 );
 
-/**
- * FREQUENT ACCOUNTS
- */
+// ============= FREQUENT ACCOUNTS =============
 
+/**
+ * @route    GET /api/offramp/frequent-accounts
+ * @access   Private (JWT required)
+ * @desc     Get frequently used bank accounts
+ * 
+ * @query    type - 'top' (default) or 'recent'
+ * @query    limit - Number of accounts (default: 5, max: 20)
+ * 
+ * @example
+ * GET /api/offramp/frequent-accounts?type=top&limit=5
+ * Authorization: Bearer {jwt_token}
+ */
 router.get(
   '/frequent-accounts',
   protect,
@@ -371,28 +371,26 @@ router.get(
   offrampController.getFrequentAccounts
 );
 
-/**
- * 404 HANDLER
- */
+// ============= 404 HANDLER =============
 
 router.use((req: Request, res: Response) => {
   res.status(404).json({
     success: false,
     error: `Offramp endpoint not found: ${req.method} ${req.path}`,
     availableEndpoints: [
-      'GET /',
-      'GET /rate',
-      'POST /verify-account',
-      'POST /webhook/lenco',
-      'POST /initiate',
-      'POST /confirm-account-and-sign',
-      'GET /status/:reference',
-      'GET /history',
-      'POST /beneficiaries',
-      'GET /beneficiaries',
-      'DELETE /beneficiaries/:id',
-      'PUT /beneficiaries/:id/default',
-      'GET /frequent-accounts'
+      'GET  /api/offramp',
+      'GET  /api/offramp/rate',
+      'POST /api/offramp/verify-account',
+      'POST /api/offramp/webhook/lenco',
+      'POST /api/offramp/initiate',
+      'POST /api/offramp/confirm-account-and-sign',
+      'GET  /api/offramp/status/:reference',
+      'GET  /api/offramp/history',
+      'POST /api/offramp/beneficiaries',
+      'GET  /api/offramp/beneficiaries',
+      'DELETE /api/offramp/beneficiaries/:id',
+      'PUT /api/offramp/beneficiaries/:id/default',
+      'GET /api/offramp/frequent-accounts'
     ]
   });
 });

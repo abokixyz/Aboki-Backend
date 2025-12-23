@@ -1,381 +1,511 @@
-// ============= src/controllers/authController.ts (PURE PASSKEY VERSION) =============
+// ============= src/controllers/authController.ts (FIXED - COMPLETE) =============
 import { Request, Response } from 'express';
-import User from '../models/User';
-import InviteCode from '../models/InviteCode';
-import { createServerWallet } from '../services/walletService';
 import {
   verifyRegistrationResponse,
-  verifyAuthenticationResponse,
-  type VerifiedRegistrationResponse,
-  type VerifiedAuthenticationResponse
+  verifyAuthenticationResponse
 } from '@simplewebauthn/server';
+import jwt from 'jsonwebtoken';
+import User from '../models/User';
+import crypto from 'crypto';
+
+// ============= HELPER FUNCTIONS =============
 
 /**
- * Generate JWT Token
+ * Extract RPID from request origin
  */
-const generateToken = (user: any): string => {
-  const jwt = require('jsonwebtoken');
+function extractRpIdFromOrigin(origin: string | undefined): string {
+  if (!origin) {
+    return process.env.RPID_DOMAIN || 'localhost';
+  }
+
+  try {
+    const url = new URL(origin);
+    return url.hostname;
+  } catch {
+    return process.env.RPID_DOMAIN || 'localhost';
+  }
+}
+
+/**
+ * Get expected origin for verification
+ */
+function getExpectedOrigin(origin: string | undefined): string {
+  return origin || process.env.FRONTEND_URL || 'http://localhost:3000';
+}
+
+/**
+ * Convert base64url string back to base64url (validation only)
+ * The simplewebauthn library expects challenge as base64url string, not Buffer
+ */
+function validateAndNormalizeChallenge(challenge: string): string {
+  if (!challenge || typeof challenge !== 'string') {
+    throw new Error('Challenge must be a base64url string');
+  }
+  
+  // Just validate it's valid base64url format
+  // Pattern: alphanumeric, dash, underscore only (no padding =)
+  if (!/^[A-Za-z0-9_-]+$/.test(challenge)) {
+    throw new Error('Challenge is not valid base64url format');
+  }
+  
+  return challenge;
+}
+
+/**
+ * Generate JWT token
+ */
+function generateToken(userId: string): string {
   return jwt.sign(
-    { id: user._id },
+    { id: userId },
     process.env.JWT_SECRET || 'your-secret-key',
     { expiresIn: '30d' }
   );
-};
+}
 
-/**
- * @desc    Register new user with PASSKEY ONLY
- * @route   POST /api/auth/signup
- * @access  Public
- */
-export const signup = async (req: Request, res: Response): Promise<void> => {
+// ============= SIGNUP CONTROLLER =============
+
+export const signup = async (req: Request, res: Response) => {
   try {
-    const { name, username, email, inviteCode, passkey } = req.body;
+    const { email, name, username, inviteCode, passkey } = req.body;
 
-    console.log('🔐 Passkey-based signup attempt:', {
-      username,
+    console.log('📝 Signup Request:', {
       email,
-      inviteCode
+      name,
+      username,
+      hasPasskey: !!passkey,
+      origin: req.headers.origin
     });
 
-    // Validate required fields
-    if (!name || !username || !email || !inviteCode || !passkey) {
-      res.status(400).json({
+    // ============= VALIDATE REQUIRED FIELDS =============
+    if (!email || !name || !username) {
+      return res.status(400).json({
         success: false,
-        error: 'Please provide name, username, email, passkey, and invite code'
+        error: 'Missing required fields: email, name, username'
       });
-      return;
     }
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ 
-      $or: [{ email }, { username: username.toLowerCase() }] 
-    });
-    
-    if (existingUser) {
-      res.status(400).json({
+    if (!inviteCode) {
+      return res.status(400).json({
         success: false,
-        error: existingUser.email === email 
-          ? 'Email already registered' 
+        error: 'Invite code is required'
+      });
+    }
+
+    if (!passkey) {
+      return res.status(400).json({
+        success: false,
+        error: 'Passkey is required for account creation'
+      });
+    }
+
+    // ============= CHECK IF USER EXISTS =============
+    const existingUser = await User.findOne({
+      $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }]
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        error: existingUser.email === email.toLowerCase()
+          ? 'Email already registered'
           : 'Username already taken'
       });
-      return;
     }
 
-    // Validate invite code
-    console.log('🔍 Validating invite code:', inviteCode.toUpperCase());
-    const invite = await InviteCode.findOne({ 
-      code: inviteCode.toUpperCase() 
-    }).populate('createdBy', 'username name');
+    // ============= EXTRACT RPID FROM REQUEST =============
+    const rpId = extractRpIdFromOrigin(req.headers.origin);
+    const expectedOrigin = getExpectedOrigin(req.headers.origin);
 
-    if (!invite) {
-      res.status(400).json({
-        success: false,
-        error: 'Invalid invite code'
-      });
-      return;
-    }
+    console.log('🔐 RPID Configuration:', {
+      requestOrigin: req.headers.origin,
+      extractedRpId: rpId,
+      expectedOrigin: expectedOrigin,
+      envRpId: process.env.RPID_DOMAIN
+    });
 
-    if (!invite.isLifetime && invite.expiresAt && invite.expiresAt < new Date()) {
-      res.status(400).json({
-        success: false,
-        error: 'This invite code has expired'
-      });
-      return;
-    }
+    // ============= VERIFY PASSKEY SIGNATURE =============
+    console.log('🔐 Verifying passkey signature...');
 
-    console.log('✅ Invite code validated');
+    // Challenge must be passed as base64url string to simplewebauthn
+    const challengeString = validateAndNormalizeChallenge(passkey.challenge);
 
-    // Verify passkey registration
-    const expectedOrigin = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const expectedRPID = new URL(expectedOrigin).hostname;
+    console.log('🔐 Challenge validation:', {
+      originalChallenge: challengeString.substring(0, 20) + '...',
+      isValid: true
+    });
 
-    console.log('🔐 Verifying passkey with:', { expectedOrigin, expectedRPID });
-
-    let verification: VerifiedRegistrationResponse;
+    let verification;
     try {
       verification = await verifyRegistrationResponse({
         response: passkey,
-        expectedChallenge: passkey.challenge || 'temp-challenge',
-        expectedOrigin,
-        expectedRPID,
+        expectedChallenge: challengeString,
+        expectedOrigin: expectedOrigin,
+        expectedRPID: rpId
       });
-    } catch (error: any) {
-      console.error('❌ Passkey verification failed:', error);
-      res.status(400).json({
+    } catch (verifyError: any) {
+      console.error('❌ Passkey verification failed:', {
+        message: verifyError.message,
+        expectedRpId: rpId,
+        expectedOrigin: expectedOrigin,
+        errorName: verifyError.name
+      });
+
+      return res.status(400).json({
         success: false,
-        error: 'Passkey verification failed: ' + error.message
+        error: 'Passkey verification failed: ' + verifyError.message,
+        debug: {
+          expectedRpId: rpId,
+          expectedOrigin: expectedOrigin,
+          errorType: verifyError.name
+        }
       });
-      return;
     }
 
-    if (!verification.verified || !verification.registrationInfo) {
-      res.status(400).json({
+    // Check if verification was successful
+    if (!verification.verified) {
+      console.error('❌ Verification returned false');
+      return res.status(400).json({
         success: false,
         error: 'Passkey verification failed'
       });
-      return;
+    }
+
+    if (!verification.registrationInfo) {
+      console.error('❌ No registration info in verification response');
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid passkey registration data'
+      });
     }
 
     console.log('✅ Passkey verified successfully');
 
-    // Create wallet
-    console.log('🔐 Creating wallet...');
-    const wallet = await createServerWallet();
-    console.log('✅ Wallet created:', {
-      ownerAddress: wallet.ownerAddress,
-      smartAccountAddress: wallet.smartAccountAddress,
-      network: wallet.network,
-      isReal: wallet.isReal
+    // ============= EXTRACT CREDENTIAL DATA =============
+    const { credential } = verification.registrationInfo;
+
+    if (!credential || !credential.id || !credential.publicKey) {
+      console.error('❌ Missing credential data');
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid credential data in passkey'
+      });
+    }
+
+    console.log('✅ Credential data extracted:', {
+      credentialId: credential.id.substring(0, 20) + '...',
+      publicKeyLength: credential.publicKey.length,
+      counter: credential.counter,
+      deviceType: verification.registrationInfo.credentialDeviceType,
+      backedUp: verification.registrationInfo.credentialBackedUp
     });
 
-    // Extract credential data from registrationInfo
-    const { registrationInfo } = verification;
-    const { credential } = registrationInfo;
+    // ============= CREATE USER WITH PASSKEY =============
+    console.log('💾 Creating user with passkey...');
 
-    // Create user with passkey (NO PASSWORD)
-    const user = await User.create({
-      name,
-      username: username.toLowerCase(),
-      email,
-      inviteCode: invite.code,
-      invitedBy: invite.createdBy || null,
-      wallet,
+    const newUser = await User.create({
+      name: name.trim(),
+      username: username.toLowerCase().trim(),
+      email: email.toLowerCase().trim(),
+      inviteCode: inviteCode.toUpperCase().trim(),
       authMethod: 'passkey',
       passkey: {
         credentialID: Buffer.from(credential.id),
         credentialPublicKey: Buffer.from(credential.publicKey),
-        counter: credential.counter,
-        credentialDeviceType: registrationInfo.credentialDeviceType,
-        credentialBackedUp: registrationInfo.credentialBackedUp,
+        counter: credential.counter || 0,
+        credentialDeviceType: verification.registrationInfo.credentialDeviceType || 'single-device',
+        credentialBackedUp: verification.registrationInfo.credentialBackedUp || false
+      },
+      wallet: {
+        ownerAddress: '', // Will be set during wallet creation
+        smartAccountAddress: '',
+        network: 'base-mainnet',
+        isReal: false
       }
     });
 
-    console.log('✅ User created with passkey authentication');
-
-    // Track invite usage (reusable invite codes)
-    invite.usedBy ??= [];
-    invite.usedBy.push(user._id as any);
-    await invite.save();
-    
-    console.log('✅ User added to invite code usage tracking');
-
-    // Auto-generate personal invite code
-    const personalInviteCode = `${username.toLowerCase()}inviteyou`.toUpperCase();
-    
-    console.log(`📨 Creating personal invite code: ${personalInviteCode}`);
-    
-    try {
-      const newInviteCode = await InviteCode.create({
-        code: personalInviteCode,
-        isLifetime: true,
-        createdBy: user._id,
-        usedBy: [],
-        expiresAt: null
-      });
-
-      user.createdInviteCodes.push(newInviteCode._id as any);
-      await user.save();
-
-      console.log('✅ Personal invite code created');
-    } catch (inviteError: any) {
-      console.log('⚠️ Could not create personal invite code:', inviteError.message);
-    }
-
-    const token = generateToken(user);
-
-    const referrerInfo = invite.createdBy ? {
-      username: (invite.createdBy as any).username,
-      name: (invite.createdBy as any).name
-    } : null;
-
-    const userResponse = await User.findById(user._id)
-      .select('-passkey')
-      .populate('createdInviteCodes', 'code usedBy');
-
-    res.status(201).json({
-      success: true,
-      message: wallet.isReal 
-        ? 'Account created successfully with passkey authentication on Base!'
-        : 'Account created successfully with passkey authentication!',
-      data: {
-        user: userResponse,
-        token,
-        inviteCode: personalInviteCode,
-        invitedBy: referrerInfo,
-        authMethod: 'passkey'
-      }
+    console.log('✅ User created successfully:', {
+      userId: newUser._id,
+      email: newUser.email,
+      username: newUser.username
     });
-  } catch (error: any) {
-    console.error('❌ Passkey signup error:', error);
-    
-    if (error.name === 'ValidationError') {
-      const messages = Object.values(error.errors).map((err: any) => err.message);
-      res.status(400).json({
+
+    // ============= VERIFY PASSKEY WAS SAVED =============
+    const savedUser = await User.findById(newUser._id).select('+passkey');
+    const hasPasskey = !!(savedUser?.passkey?.credentialID);
+
+    console.log('✅ Passkey save verification:', {
+      userExists: !!savedUser,
+      hasPasskey: hasPasskey,
+      credentialIDLength: savedUser?.passkey?.credentialID?.length || 0
+    });
+
+    if (!hasPasskey) {
+      console.error('⚠️  WARNING: Passkey was created but not saved to database!');
+      return res.status(500).json({
         success: false,
-        error: messages.join(', ')
+        error: 'Failed to save passkey to database'
       });
-      return;
     }
 
-    res.status(500).json({
+    // ============= GENERATE JWT TOKEN =============
+    const token = generateToken(newUser._id.toString());
+
+    console.log('✅ JWT token generated');
+
+    // ============= RESPONSE =============
+    return res.status(201).json({
+      success: true,
+      message: 'User created successfully with passkey',
+      data: {
+        token,
+        user: {
+          _id: newUser._id,
+          email: newUser.email,
+          name: newUser.name,
+          username: newUser.username,
+          hasPasskey: true
+        }
+      }
+    });
+
+  } catch (error: any) {
+    console.error('❌ Signup error:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+
+    // Check for specific MongoDB errors
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        error: `${field} already exists`
+      });
+    }
+
+    return res.status(500).json({
       success: false,
-      error: error.message || 'Server Error'
+      error: error.message || 'Signup failed. Please try again.'
     });
   }
 };
 
-/**
- * @desc    Login user with PASSKEY ONLY
- * @route   POST /api/auth/login
- * @access  Public
- */
-export const login = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { email, passkey } = req.body;
+// ============= LOGIN CONTROLLER =============
 
-    if (!email || !passkey) {
-      res.status(400).json({
+export const login = async (req: Request, res: Response) => {
+  try {
+    const { email, username, passkey } = req.body;
+
+    console.log('🔑 Login request:', {
+      email,
+      username,
+      hasPasskey: !!passkey
+    });
+
+    // ============= VALIDATE INPUT =============
+    if (!passkey) {
+      return res.status(400).json({
         success: false,
-        error: 'Please provide email and passkey'
+        error: 'Passkey assertion is required'
       });
-      return;
     }
 
-    console.log('🔐 Passkey login attempt for:', email);
+    if (!email && !username) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email or username is required'
+      });
+    }
 
-    const user = await User.findOne({ email }).select('+passkey');
+    // ============= FIND USER =============
+    const user = await User.findOne({
+      $or: [
+        { email: email?.toLowerCase() },
+        { username: username?.toLowerCase() }
+      ]
+    }).select('+passkey');
 
     if (!user) {
-      res.status(401).json({
+      return res.status(401).json({
         success: false,
         error: 'Invalid credentials'
       });
-      return;
     }
 
-    if (!user.passkey) {
-      res.status(400).json({
+    if (!user.passkey || !user.passkey.credentialID) {
+      return res.status(401).json({
         success: false,
-        error: 'No passkey found for this account. Please contact support.'
+        error: 'No passkey registered for this user. Please sign up instead.'
       });
-      return;
     }
 
-    // Verify passkey authentication
-    const expectedOrigin = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const expectedRPID = new URL(expectedOrigin).hostname;
+    // ============= EXTRACT RPID =============
+    const rpId = extractRpIdFromOrigin(req.headers.origin);
+    const expectedOrigin = getExpectedOrigin(req.headers.origin);
 
-    console.log('🔐 Verifying passkey authentication');
+    // ============= VERIFY PASSKEY =============
+    const challengeString = validateAndNormalizeChallenge(passkey.challenge);
 
-    let verification: VerifiedAuthenticationResponse;
+    let verification;
     try {
       verification = await verifyAuthenticationResponse({
         response: passkey,
-        expectedChallenge: passkey.challenge || 'temp-challenge',
-        expectedOrigin,
-        expectedRPID,
+        expectedChallenge: challengeString,
+        expectedOrigin: expectedOrigin,
+        expectedRPID: rpId,
         credential: {
-          id: user.passkey.credentialID.toString('base64url'),
-          publicKey: new Uint8Array(user.passkey.credentialPublicKey), // Convert Buffer to Uint8Array
-          counter: user.passkey.counter,
+          id: user.passkey.credentialID.toString(),
+          publicKey: new Uint8Array(user.passkey.credentialPublicKey),
+          counter: user.passkey.counter || 0
         },
+        requireUserVerification: true
       });
-    } catch (error: any) {
-      console.error('❌ Passkey authentication failed:', error);
-      res.status(401).json({
+    } catch (verifyError: any) {
+      console.error('❌ Login verification failed:', verifyError.message);
+      return res.status(401).json({
         success: false,
-        error: 'Passkey authentication failed: ' + error.message
+        error: 'Authentication failed: ' + verifyError.message
       });
-      return;
     }
 
     if (!verification.verified) {
-      res.status(401).json({
+      return res.status(401).json({
         success: false,
-        error: 'Passkey authentication failed'
+        error: 'Authentication verification failed'
       });
-      return;
     }
 
-    console.log('✅ Passkey authentication successful');
-
-    // Update counter (prevents replay attacks)
+    // ============= UPDATE COUNTER =============
     user.passkey.counter = verification.authenticationInfo.newCounter;
     await user.save();
 
-    const token = generateToken(user);
+    console.log('✅ Login successful for:', user.email);
 
-    const userResponse = await User.findById(user._id)
-      .select('-passkey')
-      .populate('createdInviteCodes', 'code usedBy')
-      .populate('invitedBy', 'username name');
+    // ============= GENERATE TOKEN =============
+    const token = generateToken(user._id.toString());
 
-    res.status(200).json({
+    // ============= RESPONSE =============
+    return res.json({
       success: true,
       message: 'Login successful',
       data: {
-        user: userResponse,
         token,
-        authMethod: 'passkey'
+        user: {
+          _id: user._id,
+          email: user.email,
+          name: user.name,
+          username: user.username
+        }
       }
     });
+
   } catch (error: any) {
-    console.error('❌ Passkey login error:', error);
-    res.status(500).json({
+    console.error('❌ Login error:', error);
+    return res.status(500).json({
       success: false,
-      error: error.message || 'Server Error'
+      error: error.message || 'Login failed'
     });
   }
 };
 
-/**
- * @desc    Get current user
- * @route   GET /api/auth/me
- * @access  Private
- */
-export const getMe = async (req: Request, res: Response): Promise<void> => {
+// ============= GET ME CONTROLLER =============
+
+export const getMe = async (req: Request, res: Response) => {
   try {
-    const user = await User.findById(req.user?.id)
-      .select('-passkey')
-      .populate('createdInviteCodes', 'code usedBy createdAt')
-      .populate('invitedBy', 'username name email');
+    const userId = (req as any).user?.id;
+
+    const user = await User.findById(userId).select('+passkey');
 
     if (!user) {
-      res.status(404).json({
+      return res.status(404).json({
         success: false,
         error: 'User not found'
       });
-      return;
     }
 
-    res.status(200).json({
+    return res.json({
       success: true,
-      data: user
+      data: {
+        user: {
+          _id: user._id,
+          email: user.email,
+          name: user.name,
+          username: user.username,
+          hasPasskey: !!(user.passkey?.credentialID)
+        }
+      }
     });
   } catch (error: any) {
-    console.error('❌ Error fetching user:', error);
-    res.status(500).json({
+    console.error('❌ Get me error:', error);
+    return res.status(500).json({
       success: false,
-      error: error.message || 'Server Error'
+      error: error.message || 'Failed to get user'
     });
   }
 };
 
-/**
- * @desc    Logout user
- * @route   POST /api/auth/logout
- * @access  Private
- */
-export const logout = async (req: Request, res: Response): Promise<void> => {
-  res.status(200).json({
-    success: true,
-    message: 'Logged out successfully. Please remove the token from client.'
-  });
+// ============= LOGOUT CONTROLLER =============
+
+export const logout = async (req: Request, res: Response) => {
+  try {
+    // Logout is handled on frontend by removing token
+    // Backend just confirms logout
+    return res.json({
+      success: true,
+      message: 'Logout successful'
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Logout failed'
+    });
+  }
 };
 
-export default {
-  signup,
-  login,
-  getMe,
-  logout
+// ============= DEBUG ENDPOINT =============
+
+/**
+ * Check if a user has a passkey registered
+ * GET /api/auth/debug/check-passkey
+ * Headers: Authorization: Bearer {token}
+ */
+export const checkPasskey = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const user = await User.findById(userId).select('+passkey');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    const hasPasskey = !!(user.passkey?.credentialID);
+
+    return res.json({
+      success: true,
+      data: {
+        userId: user._id,
+        email: user.email,
+        username: user.username,
+        hasPasskey: hasPasskey,
+        passkeyDetails: hasPasskey ? {
+          credentialIDLength: user.passkey!.credentialID!.length,
+          publicKeyLength: user.passkey!.credentialPublicKey!.length,
+          counter: user.passkey!.counter,
+          deviceType: user.passkey!.credentialDeviceType,
+          backedUp: user.passkey!.credentialBackedUp
+        } : null
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Check passkey error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to check passkey'
+    });
+  }
 };

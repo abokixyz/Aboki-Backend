@@ -28,6 +28,7 @@ import {
   verifyPasskeyToken, 
   requirePasskeyVerification 
 } from '../middleware/passkeyVerification';
+import { requirePasskey } from '../middleware/requirePasskey'; 
 import { validateRequest } from '../middleware/validation';
 import rateLimitMiddleware from '../middleware/rateLimiter';
 import offrampController from '../controllers/offrampController';
@@ -153,6 +154,7 @@ router.post(
 router.post(
   '/initiate',
   protect,
+  requirePasskey,  // ✅ ADD THIS LINE
   rateLimitMiddleware,
   validateRequest({
     body: {
@@ -161,6 +163,7 @@ router.post(
   }),
   offrampController.initiateOfframp
 );
+
 
 /**
  * @route    POST /api/offramp/confirm-account-and-sign
@@ -206,7 +209,8 @@ router.post(
 router.post(
   '/confirm-account-and-sign',
   protect,
-  verifyPasskeyToken,  // ✅ Check for passkey token
+  requirePasskey,  // ✅ ADD THIS LINE
+  verifyPasskeyToken,
   rateLimitMiddleware,
   offrampController.confirmAccountAndSign
 );

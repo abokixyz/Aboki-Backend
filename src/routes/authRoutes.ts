@@ -1,5 +1,10 @@
-// ============= src/routes/authRoutes.ts (PURE PASSKEY VERSION) =============
-import { Router } from 'express';
+// ============= src/routes/authRoutes.ts (COMPLETE) =============
+import { Router, Request, Response } from 'express';
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse
+} from '@simplewebauthn/server';
+import crypto from 'crypto';
 import {
   signup,
   login,
@@ -7,116 +12,34 @@ import {
   logout
 } from '../controllers/authController';
 import { protect } from '../middleware/auth';
+import User from '../models/User';
 
 const router = Router();
+
+// ============= HELPER FUNCTIONS =============
+
+const extractRpId = (origin?: string): string => {
+  try {
+    const url = new URL(origin || process.env.FRONTEND_URL || 'http://localhost:3000');
+    return url.hostname;
+  } catch {
+    return 'localhost';
+  }
+};
+
+const getOrigin = (origin?: string): string => {
+  return origin || process.env.FRONTEND_URL || 'http://localhost:3000';
+};
+
+// ============= PUBLIC AUTH ROUTES =============
 
 /**
  * @swagger
  * /api/auth/signup:
  *   post:
  *     summary: Register with PASSKEY (Passwordless)
- *     description: |
- *       Create a new account with passkey authentication (Face ID, Touch ID, Windows Hello).
- *       This is a 100% passwordless signup flow using WebAuthn/FIDO2 standard.
- *       
- *       Process:
- *       1. Validate invite code
- *       2. Verify passkey credential
- *       3. Create user account with passkey
- *       4. Generate Base blockchain wallet
- *       5. Auto-generate personal invite code
- *       6. Return JWT token
+ *     description: Create a new account with passkey authentication
  *     tags: [Authentication]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - name
- *               - username
- *               - email
- *               - passkey
- *               - inviteCode
- *             properties:
- *               name:
- *                 type: string
- *                 description: Full name
- *                 example: Jane Smith
- *               username:
- *                 type: string
- *                 description: Unique username (3-30 characters, lowercase alphanumeric and underscores)
- *                 minLength: 3
- *                 maxLength: 30
- *                 example: janesmith
- *               email:
- *                 type: string
- *                 format: email
- *                 description: Email address (must be unique)
- *                 example: jane.smith@example.com
- *               passkey:
- *                 type: object
- *                 description: WebAuthn passkey credential
- *                 properties:
- *                   id:
- *                     type: string
- *                   rawId:
- *                     type: string
- *                     format: base64
- *                   type:
- *                     type: string
- *                     example: public-key
- *                   response:
- *                     type: object
- *                     properties:
- *                       clientDataJSON:
- *                         type: string
- *                         format: base64
- *                       attestationObject:
- *                         type: string
- *                         format: base64
- *                   challenge:
- *                     type: string
- *                     format: base64
- *               inviteCode:
- *                 type: string
- *                 description: Valid invite code (reusable)
- *                 example: BOSSINVITEYOU
- *     responses:
- *       201:
- *         description: User registered successfully with passkey
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 message:
- *                   type: string
- *                   example: Account created successfully with passkey authentication on Base!
- *                 data:
- *                   type: object
- *                   properties:
- *                     user:
- *                       type: object
- *                       description: User profile (without passkey data)
- *                     token:
- *                       type: string
- *                       description: JWT authentication token
- *                     inviteCode:
- *                       type: string
- *                       description: Personal invite code (auto-generated)
- *                       example: JANESMITHINVITEYOU
- *                     authMethod:
- *                       type: string
- *                       example: passkey
- *       400:
- *         description: Bad request (validation error, passkey verification failed)
- *       500:
- *         description: Server error
  */
 router.post('/signup', signup);
 
@@ -125,87 +48,8 @@ router.post('/signup', signup);
  * /api/auth/login:
  *   post:
  *     summary: Login with PASSKEY (Passwordless)
- *     description: |
- *       Authenticate user with passkey (Face ID, Touch ID, Windows Hello).
- *       100% passwordless login using WebAuthn/FIDO2 standard.
- *       
- *       Process:
- *       1. Verify passkey assertion
- *       2. Update counter (replay attack prevention)
- *       3. Issue JWT token
+ *     description: Authenticate user with passkey
  *     tags: [Authentication]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - email
- *               - passkey
- *             properties:
- *               email:
- *                 type: string
- *                 format: email
- *                 description: User email address
- *                 example: jane.smith@example.com
- *               passkey:
- *                 type: object
- *                 description: WebAuthn passkey assertion
- *                 properties:
- *                   id:
- *                     type: string
- *                   rawId:
- *                     type: string
- *                     format: base64
- *                   type:
- *                     type: string
- *                     example: public-key
- *                   response:
- *                     type: object
- *                     properties:
- *                       clientDataJSON:
- *                         type: string
- *                         format: base64
- *                       authenticatorData:
- *                         type: string
- *                         format: base64
- *                       signature:
- *                         type: string
- *                         format: base64
- *                   challenge:
- *                     type: string
- *                     format: base64
- *     responses:
- *       200:
- *         description: Login successful
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 message:
- *                   type: string
- *                   example: Login successful
- *                 data:
- *                   type: object
- *                   properties:
- *                     user:
- *                       type: object
- *                       description: User profile with wallet and invite codes
- *                     token:
- *                       type: string
- *                       description: JWT authentication token
- *                     authMethod:
- *                       type: string
- *                       example: passkey
- *       401:
- *         description: Invalid credentials or passkey verification failed
- *       500:
- *         description: Server error
  */
 router.post('/login', login);
 
@@ -214,52 +58,10 @@ router.post('/login', login);
  * /api/auth/me:
  *   get:
  *     summary: Get current user profile
- *     description: |
- *       Get the profile of the currently authenticated user.
- *       Includes wallet info, created invite codes, and who invited you.
- *       Requires a valid JWT token in the Authorization header.
+ *     description: Get the profile of the currently authenticated user
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: User profile retrieved
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 data:
- *                   type: object
- *                   properties:
- *                     _id:
- *                       type: string
- *                     name:
- *                       type: string
- *                     username:
- *                       type: string
- *                     email:
- *                       type: string
- *                     authMethod:
- *                       type: string
- *                       example: passkey
- *                     wallet:
- *                       type: object
- *                     invitedBy:
- *                       type: object
- *                       description: User who invited you
- *                     createdInviteCodes:
- *                       type: array
- *                       description: Invite codes you created
- *       401:
- *         description: Not authorized
- *       404:
- *         description: User not found
- *       500:
- *         description: Server error
  */
 router.get('/me', protect, getMe);
 
@@ -268,27 +70,347 @@ router.get('/me', protect, getMe);
  * /api/auth/logout:
  *   post:
  *     summary: Logout user
- *     description: |
- *       Logout the current user.
- *       Note: Since we're using JWT, you should remove the token on the client side.
+ *     description: Logout the current user
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Logged out successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 message:
- *                   type: string
- *                   example: Logged out successfully. Please remove the token from client.
  */
 router.post('/logout', protect, logout);
+
+// ============= PASSKEY REGISTRATION FOR NEW USERS =============
+
+/**
+ * @swagger
+ * /api/auth/passkey/register-options:
+ *   post:
+ *     summary: Get passkey registration challenge (NEW USER SIGNUP)
+ *     description: |
+ *       Step 1 for new user signup with passkey.
+ *       Returns a challenge for device to create a passkey.
+ *     tags: [Authentication - Passkey Registration]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               email:
+ *                 type: string
+ *               name:
+ *                 type: string
+ */
+router.post('/passkey/register-options', async (req: Request, res: Response) => {
+  try {
+    const { email, name } = req.body;
+
+    if (!email || !name) {
+      res.status(400).json({
+        success: false,
+        error: 'Please provide email and name'
+      });
+      return;
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      res.status(400).json({
+        success: false,
+        error: 'Email already registered'
+      });
+      return;
+    }
+
+    const rpId = extractRpId(req.headers.origin);
+    const origin = getOrigin(req.headers.origin);
+
+    console.log('🔐 Generating passkey registration options:', {
+      email,
+      rpId,
+      origin
+    });
+
+    // Generate registration options
+    const options = await generateRegistrationOptions({
+      rpID: rpId,
+      rpName: 'Aboki',
+      userID: email,
+      userName: email,
+      userDisplayName: name,
+      attestationType: 'direct',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      timeout: 60000,
+      challenge: crypto.randomBytes(32)
+    });
+
+    // Convert challenge to base64url for frontend
+    const challengeBase64Url = Buffer.from(options.challenge).toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+
+    res.status(200).json({
+      success: true,
+      data: {
+        options,
+        challenge: challengeBase64Url,
+        rpId,
+        origin
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error generating registration options:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate registration options'
+    });
+  }
+});
+
+// ============= PASSKEY SETUP FOR EXISTING USERS =============
+
+/**
+ * @swagger
+ * /api/auth/passkey/setup-options:
+ *   post:
+ *     summary: Get passkey setup challenge (EXISTING USER)
+ *     description: |
+ *       ⭐ FOR EXISTING USERS WHO NEED TO ADD PASSKEY ⭐
+ *       Step 1 for existing user to add passkey to their account.
+ *     tags: [Authentication - Passkey Setup]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post('/passkey/setup-options', protect, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const user = await User.findById(userId).select('+passkey');
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+      return;
+    }
+
+    // Check if user already has passkey
+    if (user.passkey && user.passkey.credentialID) {
+      res.status(400).json({
+        success: false,
+        error: 'You already have a passkey registered. Use /api/auth/passkey/remove to change it.'
+      });
+      return;
+    }
+
+    const rpId = extractRpId(req.headers.origin);
+    const origin = getOrigin(req.headers.origin);
+
+    console.log('🔐 Generating passkey setup options for user:', user.email);
+
+    const options = await generateRegistrationOptions({
+      rpID: rpId,
+      rpName: 'Aboki',
+      userID: user._id.toString(),
+      userName: user.email,
+      userDisplayName: user.name,
+      attestationType: 'direct',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        residentKey: 'preferred',
+        userVerification: 'preferred',
+      },
+      timeout: 60000,
+      challenge: crypto.randomBytes(32)
+    });
+
+    const challengeBase64Url = Buffer.from(options.challenge).toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+
+    res.status(200).json({
+      success: true,
+      data: {
+        options,
+        challenge: challengeBase64Url,
+        rpId,
+        origin
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error generating setup options:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to generate setup options'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/passkey/setup:
+ *   post:
+ *     summary: Add passkey to existing user account
+ *     description: |
+ *       ⭐ FOR EXISTING USERS WHO NEED TO ADD PASSKEY ⭐
+ *       Step 2: After user creates passkey with navigator.credentials.create()
+ *     tags: [Authentication - Passkey Setup]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const { passkey } = req.body;
+
+    if (!passkey) {
+      res.status(400).json({
+        success: false,
+        error: 'No passkey credential provided'
+      });
+      return;
+    }
+
+    const user = await User.findById(userId).select('+passkey');
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+      return;
+    }
+
+    // Check if user already has passkey
+    if (user.passkey && user.passkey.credentialID) {
+      res.status(400).json({
+        success: false,
+        error: 'You already have a passkey. Remove the existing one first.'
+      });
+      return;
+    }
+
+    const rpId = extractRpId(req.headers.origin);
+    const origin = getOrigin(req.headers.origin);
+
+    console.log('🔐 Verifying passkey setup for:', user.email);
+
+    // Verify the passkey credential
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: passkey,
+        expectedChallenge: passkey.challenge || 'temp-challenge',
+        expectedOrigin: origin,
+        expectedRPID: rpId,
+      });
+    } catch (error: any) {
+      console.error('❌ Passkey verification failed:', error);
+      res.status(400).json({
+        success: false,
+        error: 'Passkey verification failed: ' + error.message
+      });
+      return;
+    }
+
+    if (!verification.verified || !verification.registrationInfo) {
+      res.status(400).json({
+        success: false,
+        error: 'Passkey verification failed'
+      });
+      return;
+    }
+
+    const { registrationInfo } = verification;
+    const { credential } = registrationInfo;
+
+    // Save passkey to user
+    user.passkey = {
+      credentialID: Buffer.from(credential.id),
+      credentialPublicKey: Buffer.from(credential.publicKey),
+      counter: credential.counter,
+      credentialDeviceType: registrationInfo.credentialDeviceType,
+      credentialBackedUp: registrationInfo.credentialBackedUp,
+    };
+
+    await user.save();
+
+    console.log('✅ Passkey added successfully for:', user.email);
+
+    res.status(200).json({
+      success: true,
+      message: 'Passkey added successfully. You can now verify transactions.',
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          hasPasskey: true
+        }
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Error setting up passkey:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to setup passkey'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/passkey/remove:
+ *   post:
+ *     summary: Remove current passkey
+ *     description: Remove existing passkey from user account
+ *     tags: [Authentication - Passkey Setup]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post('/passkey/remove', protect, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    const user = await User.findById(userId).select('+passkey');
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+      return;
+    }
+
+    if (!user.passkey || !user.passkey.credentialID) {
+      res.status(400).json({
+        success: false,
+        error: 'No passkey to remove'
+      });
+      return;
+    }
+
+    // Remove passkey
+    user.passkey = undefined;
+    await user.save();
+
+    console.log('✅ Passkey removed for:', user.email);
+
+    res.status(200).json({
+      success: true,
+      message: 'Passkey removed. You can setup a new one anytime.'
+    });
+  } catch (error: any) {
+    console.error('❌ Error removing passkey:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to remove passkey'
+    });
+  }
+});
 
 export default router;

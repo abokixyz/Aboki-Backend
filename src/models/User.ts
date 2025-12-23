@@ -1,4 +1,4 @@
-// ============= src/models/User.ts (PURE PASSKEY VERSION) =============
+// ============= src/models/User.ts (COMPLETE - PASSKEY OPTIONAL) =============
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IPasskey {
@@ -14,7 +14,7 @@ export interface IUser extends Document {
   username: string;
   email: string;
   authMethod: 'passkey';
-  passkey: IPasskey;
+  passkey?: IPasskey;  // ✅ CHANGED: Made optional with ?
   inviteCode: string;
   invitedBy?: mongoose.Types.ObjectId;
   wallet: {
@@ -22,7 +22,7 @@ export interface IUser extends Document {
     smartAccountAddress: string;
     network: string;
     isReal: boolean;
-    encryptedWalletData?: string; // Added this line
+    encryptedWalletData?: string;
   };
   createdInviteCodes: mongoose.Types.ObjectId[];
   createdAt: Date;
@@ -94,7 +94,7 @@ const UserSchema: Schema = new Schema(
     },
     passkey: {
       type: PasskeySchema,
-      required: true,
+      required: false,  // ✅ CHANGED: Made optional (not required)
       select: false, // Don't include passkey data by default (security)
       description: 'Passkey credential data for WebAuthn authentication'
     },
@@ -129,7 +129,7 @@ const UserSchema: Schema = new Schema(
       encryptedWalletData: {
         type: String,
         required: false,
-        select: false, // Don't include by default for security - must explicitly select
+        select: false, // Don't include by default for security
         description: 'Encrypted private key data for transaction signing'
       }
     },
@@ -149,5 +149,41 @@ UserSchema.index({ email: 1 });
 UserSchema.index({ username: 1 });
 UserSchema.index({ invitedBy: 1 });
 UserSchema.index({ 'passkey.credentialID': 1 }); // For passkey lookup
+
+// ============= INSTANCE METHODS =============
+
+/**
+ * Check if user has a registered passkey
+ * Usage: user.hasPasskey() returns true/false
+ */
+UserSchema.methods.hasPasskey = function(): boolean {
+  return this.passkey && this.passkey.credentialID ? true : false;
+};
+
+/**
+ * Add passkey to user
+ * Usage: user.addPasskey(passkeyData)
+ */
+UserSchema.methods.addPasskey = function(passkeyData: IPasskey): void {
+  this.passkey = passkeyData;
+};
+
+/**
+ * Remove passkey from user
+ * Usage: user.removePasskey()
+ */
+UserSchema.methods.removePasskey = function(): void {
+  this.passkey = undefined;
+};
+
+/**
+ * Update counter for replay attack prevention
+ * Usage: user.updatePasskeyCounter(newCounter)
+ */
+UserSchema.methods.updatePasskeyCounter = function(newCounter: number): void {
+  if (this.passkey) {
+    this.passkey.counter = newCounter;
+  }
+};
 
 export default mongoose.model<IUser>('User', UserSchema);

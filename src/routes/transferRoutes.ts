@@ -21,6 +21,7 @@ import {
   requirePasskeyVerification 
 } from '../middleware/passkeyVerification';
 import { validateRequest } from '../middleware/validation';
+import { requirePasskey } from '../middleware/requirePasskey';
 import rateLimitMiddleware from '../middleware/rateLimiter';
 import transferController from '../controllers/transferController';
 
@@ -191,7 +192,7 @@ router.get(
 router.post(
   '/send/username',
   protect,
-  verifyPasskeyToken,  // ✅ Check for passkey token
+  requirePasskey,  // ✅ ADD THIS LINE
   rateLimitMiddleware,
   validateRequest({
     body: {
@@ -245,7 +246,7 @@ router.post(
 router.post(
   '/send/external',
   protect,
-  verifyPasskeyToken,  // ✅ Check for passkey token
+  requirePasskey,  // ✅ ADD THIS LINE
   rateLimitMiddleware,
   validateRequest({
     body: {
@@ -289,6 +290,7 @@ router.post(
 router.post(
   '/create-link',
   protect,
+  requirePasskey,  // ✅ ADD THIS LINE
   rateLimitMiddleware,
   validateRequest({
     body: {

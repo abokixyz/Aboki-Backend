@@ -1,4 +1,4 @@
-// ============= src/routes/authRoutes.ts (COMPLETE) =============
+// ============= src/routes/authRoutes.ts (COMPLETE - FIXED) =============
 import { Router, Request, Response } from 'express';
 import {
   generateRegistrationOptions,
@@ -135,7 +135,7 @@ router.post('/passkey/register-options', async (req: Request, res: Response) => 
     const options = await generateRegistrationOptions({
       rpID: rpId,
       rpName: 'Aboki',
-      userID: email,
+      userID: new TextEncoder().encode(email), // ✅ FIXED: Convert string to Uint8Array
       userName: email,
       userDisplayName: name,
       attestationType: 'direct',
@@ -216,7 +216,7 @@ router.post('/passkey/setup-options', protect, async (req: Request, res: Respons
     const options = await generateRegistrationOptions({
       rpID: rpId,
       rpName: 'Aboki',
-      userID: user._id.toString(),
+      userID: new TextEncoder().encode(user._id.toString()), // ✅ FIXED: Convert string to Uint8Array
       userName: user.email,
       userDisplayName: user.name,
       attestationType: 'direct',

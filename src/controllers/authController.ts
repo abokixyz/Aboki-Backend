@@ -66,13 +66,14 @@ function generateToken(userId: string): string {
 
 export const signup = async (req: Request, res: Response) => {
   try {
-    const { email, name, username, inviteCode, passkey } = req.body;
+    const { email, name, username, inviteCode, passkey, challenge } = req.body; // ✅ ADDED challenge
 
     console.log('📝 Signup Request:', {
       email,
       name,
       username,
       hasPasskey: !!passkey,
+      hasChallenge: !!challenge, // ✅ ADDED
       origin: req.headers.origin
     });
 
@@ -95,6 +96,14 @@ export const signup = async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: 'Passkey is required for account creation'
+      });
+    }
+
+    // ✅ ADDED: Validate challenge is provided
+    if (!challenge) {
+      return res.status(400).json({
+        success: false,
+        error: 'Challenge is required for passkey verification'
       });
     }
 
@@ -126,11 +135,12 @@ export const signup = async (req: Request, res: Response) => {
     // ============= VERIFY PASSKEY SIGNATURE =============
     console.log('🔐 Verifying passkey signature...');
 
-    // Challenge must be passed as base64url string to simplewebauthn
-    const challengeString = validateAndNormalizeChallenge(passkey.challenge);
+    // ✅ FIXED: Use challenge from request body, not passkey.challenge
+    const challengeString = validateAndNormalizeChallenge(challenge);
 
     console.log('🔐 Challenge validation:', {
       originalChallenge: challengeString.substring(0, 20) + '...',
+      challengeLength: challengeString.length,
       isValid: true
     });
 
@@ -138,7 +148,7 @@ export const signup = async (req: Request, res: Response) => {
     try {
       verification = await verifyRegistrationResponse({
         response: passkey,
-        expectedChallenge: challengeString,
+        expectedChallenge: challengeString, // ✅ FIXED: Use challenge from body
         expectedOrigin: expectedOrigin,
         expectedRPID: rpId
       });
@@ -295,12 +305,13 @@ export const signup = async (req: Request, res: Response) => {
 
 export const login = async (req: Request, res: Response) => {
   try {
-    const { email, username, passkey } = req.body;
+    const { email, username, passkey, challenge } = req.body; // ✅ ADDED challenge
 
     console.log('🔑 Login request:', {
       email,
       username,
-      hasPasskey: !!passkey
+      hasPasskey: !!passkey,
+      hasChallenge: !!challenge // ✅ ADDED
     });
 
     // ============= VALIDATE INPUT =============
@@ -308,6 +319,14 @@ export const login = async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: 'Passkey assertion is required'
+      });
+    }
+
+    // ✅ ADDED: Validate challenge
+    if (!challenge) {
+      return res.status(400).json({
+        success: false,
+        error: 'Challenge is required for passkey verification'
       });
     }
 
@@ -345,13 +364,14 @@ export const login = async (req: Request, res: Response) => {
     const expectedOrigin = getExpectedOrigin(req.headers.origin);
 
     // ============= VERIFY PASSKEY =============
-    const challengeString = validateAndNormalizeChallenge(passkey.challenge);
+    // ✅ FIXED: Use challenge from request body
+    const challengeString = validateAndNormalizeChallenge(challenge);
 
     let verification;
     try {
       verification = await verifyAuthenticationResponse({
         response: passkey,
-        expectedChallenge: challengeString,
+        expectedChallenge: challengeString, // ✅ FIXED
         expectedOrigin: expectedOrigin,
         expectedRPID: rpId,
         credential: {

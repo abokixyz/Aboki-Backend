@@ -135,7 +135,7 @@ router.post('/passkey/register-options', async (req: Request, res: Response) => 
     const options = await generateRegistrationOptions({
       rpID: rpId,
       rpName: 'Aboki',
-      userID: new TextEncoder().encode(email), // ✅ FIXED: Convert string to Uint8Array
+      userID: new TextEncoder().encode(email),
       userName: email,
       userDisplayName: name,
       attestationType: 'direct',
@@ -216,7 +216,7 @@ router.post('/passkey/setup-options', protect, async (req: Request, res: Respons
     const options = await generateRegistrationOptions({
       rpID: rpId,
       rpName: 'Aboki',
-      userID: new TextEncoder().encode(user._id.toString()), // ✅ FIXED: Convert string to Uint8Array
+      userID: new TextEncoder().encode(user._id.toString()),
       userName: user.email,
       userDisplayName: user.name,
       attestationType: 'direct',
@@ -267,12 +267,27 @@ router.post('/passkey/setup-options', protect, async (req: Request, res: Respons
 router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { passkey } = req.body;
+    const { passkey, challenge } = req.body;
+
+    console.log('🔐 Passkey setup request:', {
+      userId,
+      hasPasskey: !!passkey,
+      hasChallenge: !!challenge,
+      passkeyKeys: passkey ? Object.keys(passkey) : []
+    });
 
     if (!passkey) {
       res.status(400).json({
         success: false,
         error: 'No passkey credential provided'
+      });
+      return;
+    }
+
+    if (!challenge) {
+      res.status(400).json({
+        success: false,
+        error: 'Challenge is required for passkey verification'
       });
       return;
     }
@@ -298,19 +313,33 @@ router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
     const rpId = extractRpId(req.headers.origin);
     const origin = getOrigin(req.headers.origin);
 
-    console.log('🔐 Verifying passkey setup for:', user.email);
+    console.log('🔐 Verifying passkey setup:', {
+      email: user.email,
+      rpId,
+      origin,
+      challengeLength: challenge.length
+    });
 
     // Verify the passkey credential
     let verification;
     try {
       verification = await verifyRegistrationResponse({
         response: passkey,
-        expectedChallenge: passkey.challenge || 'temp-challenge',
+        expectedChallenge: challenge,
         expectedOrigin: origin,
         expectedRPID: rpId,
       });
+
+      console.log('✅ Verification result:', {
+        verified: verification.verified,
+        hasRegistrationInfo: !!verification.registrationInfo
+      });
     } catch (error: any) {
-      console.error('❌ Passkey verification failed:', error);
+      console.error('❌ Passkey verification failed:', {
+        message: error.message,
+        name: error.name,
+        stack: error.stack
+      });
       res.status(400).json({
         success: false,
         error: 'Passkey verification failed: ' + error.message
@@ -329,7 +358,15 @@ router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
     const { registrationInfo } = verification;
     const { credential } = registrationInfo;
 
-    // Save passkey to user
+    console.log('📝 Credential info:', {
+      credentialIdType: typeof credential.id,
+      credentialIdLength: credential.id.length,
+      publicKeyType: typeof credential.publicKey,
+      publicKeyLength: credential.publicKey.length,
+      counter: credential.counter
+    });
+
+    // Save passkey to user with proper Buffer conversion
     user.passkey = {
       credentialID: Buffer.from(credential.id),
       credentialPublicKey: Buffer.from(credential.publicKey),
@@ -338,7 +375,28 @@ router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
       credentialBackedUp: registrationInfo.credentialBackedUp,
     };
 
+    console.log('💾 Saving passkey to database...');
     await user.save();
+
+    // VERIFY IT WAS SAVED
+    const verifyUser = await User.findById(userId).select('+passkey');
+    const passkeyWasSaved = !!(verifyUser?.passkey?.credentialID);
+
+    console.log('✅ Passkey save verification:', {
+      userFound: !!verifyUser,
+      hasPasskey: passkeyWasSaved,
+      credentialIDLength: verifyUser?.passkey?.credentialID?.length || 0,
+      publicKeyLength: verifyUser?.passkey?.credentialPublicKey?.length || 0
+    });
+
+    if (!passkeyWasSaved) {
+      console.error('❌ CRITICAL: Passkey was not saved to database!');
+      res.status(500).json({
+        success: false,
+        error: 'Failed to save passkey to database'
+      });
+      return;
+    }
 
     console.log('✅ Passkey added successfully for:', user.email);
 
@@ -355,7 +413,11 @@ router.post('/passkey/setup', protect, async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
-    console.error('❌ Error setting up passkey:', error);
+    console.error('❌ Error setting up passkey:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to setup passkey'
